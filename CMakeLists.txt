@@ -52,7 +52,7 @@ qwen_target(qwen_adapter)
 add_executable(qwen_helper src/qwen_helper.cpp)
 target_link_libraries(qwen_helper PRIVATE qwen_provider)
 qwen_target(qwen_helper)
-add_executable(qwen_launch_bridge src/qwen_launch_bridge.cpp)
+logonomic_cli_addon_add_launch_bridge(qwen_launch_bridge)
 qwen_target(qwen_launch_bridge)
 
 logonomic_cli_addon_package_platform(QWEN_PLATFORM)
