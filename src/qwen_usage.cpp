@@ -1123,6 +1123,10 @@ void handle_usage(addon::Invocation_context& context)
         page.scope = snapshot->scope;
         page.snapshot_id = identifier;
         page.cache_candidate = snapshot->cache_candidate;
+        if (version == 3) {
+            page.account_context = request->context.account_context;
+            page.profile_storage = request->context.profile_storage;
+        }
         page.incomplete_historical_coverage = snapshot->incomplete;
         std::size_t end = begin;
         std::size_t bytes = 0;

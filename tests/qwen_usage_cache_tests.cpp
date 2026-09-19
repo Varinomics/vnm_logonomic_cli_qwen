@@ -145,9 +145,31 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     const auto page_for = [&](const addon::Usage_scan_request& input, std::uint16_t version) {
         const auto outcome = outcome_for(input, version);
         check(outcome.status == addon::Host_status::SUCCESS,
-            "packaged scan failed: " + outcome.reason_code);
+            "packaged scan failed: " + outcome.reason_code + "; request=" +
+                addon::serialize_json(addon::encode_usage_scan_request(input, version)));
         const auto page = addon::decode_usage_scan_result(outcome.payload, &failure, version);
         check(page.has_value(), failure.detail);
+        if (version == 3) {
+            check(page->profile_storage && input.context.profile_storage &&
+                page->profile_storage->version == input.context.profile_storage->version &&
+                page->profile_storage->root == input.context.profile_storage->root,
+                "every usage3 page echoes the exact requested profile storage");
+            check(page->account_context.has_value() == input.context.account_context.has_value(),
+                "usage3 preserves account-context presence without synthesizing it");
+            if (input.context.account_context) {
+                check(addon::encode_account_context(*page->account_context) ==
+                    addon::encode_account_context(*input.context.account_context),
+                    "every usage3 page preserves account version, key and profile exactly");
+            }
+            else {
+                check(!outcome.payload.find("account_context"),
+                    "absent account context is omitted on the wire, not null");
+            }
+        }
+        else {
+            check(!outcome.payload.find("account_context") && !outcome.payload.find("profile_storage"),
+                "legacy usage pages do not acquire usage3 acknowledgments");
+        }
         return *page;
     };
     const auto all_pages = [&](addon::Usage_scan_request input, std::uint16_t version) {
@@ -212,6 +234,25 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     for (const auto& record : first.records) {
         check(record.aggregate_evidence == "partial", "surviving native subsets make conservative evidence claims");
     }
+
+    select("account-v1", std::nullopt);
+    request.context.account_context->version = 1;
+    request.context.account_context->profile_path.reset();
+    // Version one has no profile locator; acknowledgment support must not
+    // bypass the native provider's existing explicit-account admission.
+    const auto version_one = outcome_for(request, 3);
+    check(version_one.status != addon::Host_status::SUCCESS &&
+        version_one.reason_code == "usage_source_unavailable",
+        "version-one account without a profile locator retains its explicit refusal");
+    request.context = first_request.context;
+    validate(*first.cache_candidate);
+
+    select("account-absent", std::nullopt);
+    request.context.account_context.reset();
+    const auto account_absent = all_pages(request, 3);
+    check(account_absent.records.size() == 270 && total(account_absent) == 2700,
+        "environment-selected profile keeps account context absent on every page");
+    request.context = first_request.context;
 
     sources = write_sources(profile, 1);
     select("unaccepted", first.cache_candidate);
