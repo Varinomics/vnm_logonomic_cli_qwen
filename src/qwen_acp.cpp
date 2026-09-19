@@ -354,6 +354,7 @@ std::string initial_acp_input(const addon::Delegated_prepare_request& request)
 std::string initial_acp_state(std::string_view prompt)
 {
     return addon::serialize_json(object({{"stage", Json("await_initialize")}, {"pending_base64", Json("")},
+        {"deferred_input_base64", Json("")},
         {"prompt_base64", Json(addon::encode_base64(prompt))}, {"session_id", Json("")},
         {"result_base64", Json("")}}));
 }
@@ -361,7 +362,7 @@ std::string initial_acp_state(std::string_view prompt)
 addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection& inspection)
 {
     const auto parsed = parse(inspection.protocol_state);
-    if (!parsed || !exact_keys(*parsed, {"stage", "pending_base64", "prompt_base64", "session_id", "result_base64"}) ||
+    if (!parsed || !exact_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id", "result_base64"}) ||
         !member(*parsed, "stage").is_string() || !bounded_string(member(*parsed, "session_id"), 512, true)) {
         return failure("malformed_acp_state");
     }
@@ -370,13 +371,14 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
     if (initial_stage != "await_initialize" && initial_stage != "await_new" &&
         initial_stage != "await_mode" && initial_stage != "await_prompt" &&
         initial_stage != "await_drain") return failure("malformed_acp_state");
-    for (const auto key : {"pending_base64", "prompt_base64", "result_base64"}) {
+    for (const auto key : {"pending_base64", "deferred_input_base64", "prompt_base64", "result_base64"}) {
         if (!member(state, key).is_string()) return failure("malformed_acp_state");
     }
     auto pending = addon::decode_base64(text(state, "pending_base64"));
+    auto deferred_input = addon::decode_base64(text(state, "deferred_input_base64"));
     auto prompt  = addon::decode_base64(text(state, "prompt_base64"));
     auto output  = addon::decode_base64(text(state, "result_base64"));
-    if (!pending || !prompt || !output || output->size() > k_result_limit) return failure("malformed_acp_state");
+    if (!pending || !deferred_input || !prompt || !output || output->size() > k_result_limit) return failure("malformed_acp_state");
     const auto state_session = text(state, "session_id");
     if ((initial_stage == "await_initialize" && (!state_session.empty() || !output->empty())) ||
         (initial_stage == "await_new" && !output->empty()) ||
@@ -387,7 +389,9 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         return failure("malformed_acp_state");
     }
     *pending += inspection.stdout_bytes;
-    std::string input;
+    // A reply proposed while a native record is incomplete has not been
+    // written yet. Retain that causal boundary across inspection calls.
+    std::string input = std::move(*deferred_input);
     bool completed = initial_stage == "await_drain";
     for (;;) {
         const auto end = pending->find('\n');
@@ -472,13 +476,18 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         return result;
     }
     if (inspection.final) return failure(inspection.timed_out ? "acp_timeout" : "acp_incomplete");
+    // Never release a native request over an already observed, unclassified
+    // output prefix. Complete housekeeping may be accepted, but a task reply
+    // produced before its request must still be rejected on the next call.
+    const bool defer_input = !pending->empty() && !input.empty();
+    state.set("deferred_input_base64", Json(defer_input ? addon::encode_base64(input) : ""));
     state.set("pending_base64", Json(addon::encode_base64(*pending)));
     state.set("result_base64", Json(addon::encode_base64(*output)));
     addon::Structured_inspect_result result;
     result.protocol_state = addon::serialize_json(state);
     result.close_stdin = completed && initial_stage != "await_drain";
     if (!addon::exchange_protocol_state_valid(result.protocol_state)) return failure("acp_state_limit");
-    if (!input.empty()) result.stdin_bytes = std::move(input);
+    if (!defer_input && !input.empty()) result.stdin_bytes = std::move(input);
     return result;
 }
 

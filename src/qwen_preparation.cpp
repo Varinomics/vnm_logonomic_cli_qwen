@@ -157,6 +157,20 @@ void prepare_delegated(addon::Invocation_context& invocation)
         invocation.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
         return;
     }
+    // Containment, not native qualification: configuration or mode
+    // acknowledgment does not prove required actions entered the dispatcher.
+    // The host requires nonempty actions, so this refuses all host delegation
+    // before native probes, process proposals or task bytes can be produced.
+    // Remove this boundary only with an integrated native admission contract.
+    for (const auto& server : request->control.servers) {
+        if (!server.actions.empty()) {
+            const bool cancelled = invocation.cancel_requested();
+            invocation.fail(cancelled ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,
+                cancelled ? "cancelled" : "required_control_admission_unavailable",
+                "Required native control-action admission is not implemented by this adapter.");
+            return;
+        }
+    }
     if (!bootstrap_available(request->context.launch_environment, invocation)) {
         return;
     }

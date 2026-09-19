@@ -63,6 +63,11 @@ file(GLOB_RECURSE package_files CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/package/capabilities/*"
     "${CMAKE_CURRENT_SOURCE_DIR}/package/provenance/*"
     "${CMAKE_CURRENT_SOURCE_DIR}/package/notices/*")
+# Directory membership is an input too: removing a resource, or adding one
+# with an older timestamp, must rebuild the indexed package. file(GENERATE)
+# changes this file only when membership changes, preserving no-op builds.
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt"
+    CONTENT "${package_files}\n")
 add_custom_command(
     OUTPUT "${QWEN_PACKAGE_DIRECTORY}/package.files.json"
     COMMAND "${CMAKE_COMMAND}" -E rm -rf "${QWEN_PACKAGE_DIRECTORY}"
@@ -82,7 +87,7 @@ add_custom_command(
         --third-party "notices/qwen-NOTICE.txt" "notices/qwen-LICENSE.txt"
             "provenance/qwen_logo.json"
     DEPENDS qwen_adapter qwen_helper qwen_launch_bridge logonomic_cli_addon_index
-        "${CMAKE_BINARY_DIR}/generated/logonomic-cli-addon.json" ${package_files}
+        "${CMAKE_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt" ${package_files}
     VERBATIM)
 add_custom_target(qwen_package ALL DEPENDS "${QWEN_PACKAGE_DIRECTORY}/package.files.json")
 
@@ -108,3 +113,33 @@ add_test(NAME qwen_package_validation COMMAND logonomic_cli_addon_validate "${QW
 add_test(NAME qwen_package_conformance COMMAND logonomic_cli_addon_conformance "${QWEN_PACKAGE_DIRECTORY}")
 set_tests_properties(qwen_contract_tests qwen_usage_tests qwen_acp_tests qwen_package_validation qwen_package_conformance PROPERTIES TIMEOUT 120)
 logonomic_cli_addon_install_package("${QWEN_PACKAGE_DIRECTORY}" logonomic.cli.qwen)
+
+add_executable(qwen_acp_causal_tests tests/qwen_acp_causal_tests.cpp)
+target_link_libraries(qwen_acp_causal_tests PRIVATE qwen_provider)
+qwen_target(qwen_acp_causal_tests)
+add_test(NAME qwen_acp_causal_tests COMMAND qwen_acp_causal_tests)
+set_tests_properties(qwen_acp_causal_tests PROPERTIES TIMEOUT 120 LABELS "addon;protocol;causality")
+
+# Exercise this repository's actual producer, never a substitute packaging
+# implementation. The isolated nested configure uses this same SDK source;
+# it does not change the owned master dependency or edit an installed package.
+option(LOGONOMIC_CLI_ADDON_RECIPE_TESTS
+    "Register isolated package rebuild regressions (requires Python 3)" OFF)
+if(LOGONOMIC_CLI_ADDON_RECIPE_TESTS)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    get_target_property(_membership_sdk_source logonomic_cli_addon_sdk::sdk SOURCE_DIR)
+    add_test(NAME qwen_package_membership
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_membership_tests.py"
+            "--source=${CMAKE_CURRENT_SOURCE_DIR}" "--sdk=${_membership_sdk_source}"
+            "--cmake=${CMAKE_COMMAND}" "--target=qwen_package" "--package-id=logonomic.cli.qwen"
+            "--generator=${CMAKE_GENERATOR}" "--config=$<CONFIG>" "--build-type=${CMAKE_BUILD_TYPE}"
+            "--generator-platform=${CMAKE_GENERATOR_PLATFORM}" "--toolset=${CMAKE_GENERATOR_TOOLSET}"
+            "--toolchain=${CMAKE_TOOLCHAIN_FILE}" "--compiler=${CMAKE_CXX_COMPILER}"
+            "--make-program=${CMAKE_MAKE_PROGRAM}" "--prefix-path=${CMAKE_PREFIX_PATH}"
+            "--validator=$<TARGET_FILE:logonomic_cli_addon_validate>" "--platform=${QWEN_PLATFORM}")
+    set_tests_properties(qwen_package_membership PROPERTIES
+        TIMEOUT 1800 RESOURCE_LOCK cli_addon_recipe_rebuild LABELS "cli-addon;delivery;recipe;owning-path")
+endif()
+# Contract and recipe tests must not be confused with real native qualification.
+get_directory_property(_provider_tests TESTS)
+set_property(TEST ${_provider_tests} APPEND PROPERTY LABELS "cli-addon;provider-contract")

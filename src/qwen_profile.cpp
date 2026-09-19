@@ -1,3 +1,4 @@
+#include <logonomic_cli_addon/package_source.h>
 #include "qwen_profile.h"
 
 #include <logonomic_cli_addon/sha256.h>

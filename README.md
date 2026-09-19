@@ -8,7 +8,11 @@ The integration uses Qwen's native command hooks, exact UUID session resume,
 and Agent Client Protocol. Structured and delegated implementation sessions
 use native ACP with the existing configured authentication and model. They do
 not offer read-only review: the implementation protocol selects Qwen's `yolo`
-mode. Delegated task actions remain enforced by the host's task-control server.
+mode. Delegated preparation refuses nonempty required control-action lists with
+`required_control_admission_unavailable` before native probes or process
+proposals. Because the host requires nonempty actions, this disables all valid
+host delegation. Interactive launch and resume remain independent. ACP mode
+acknowledgment does not establish native action admission.
 These operations require `structured-session@3` and, for delegation,
 `delegated-session@3`. An authenticated prompt response requests native stdin
 EOF; validated advisory output is drained through clean process exit before the

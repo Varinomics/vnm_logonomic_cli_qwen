@@ -15,7 +15,7 @@ namespace addon = logonomic::cli_addon;
 
 bool identity(std::string_view value)
 {
-    return !value.empty() && value.size() <= addon::k_max_lifecycle_identity_bytes &&
+    return !value.empty() && value.size() <= addon::limits::k_max_lifecycle_identity_bytes &&
         value.find('\0') == std::string_view::npos && addon::is_valid_utf8(value);
 }
 
