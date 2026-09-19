@@ -975,7 +975,7 @@ void collect_retained(const addon::Usage_scan_request& request, const fs::path& 
     Snapshot& candidate, addon::Invocation_context& context)
 {
     const auto directory = request.cache_selection
-        ? addon::path_from_utf8(request.cache_selection->candidate_root)
+        ? addon::usage_cache_io_path(addon::path_from_utf8(request.cache_selection->candidate_root))
         : storage_directory(request);
     std::unique_ptr<Storage_lock> storage_lock;
     fs::path input_file = directory / "records";
@@ -996,7 +996,7 @@ void collect_retained(const addon::Usage_scan_request& request, const fs::path& 
             {
                 throw Usage_error("usage_cache_format_unsupported");
             }
-            input_file = addon::path_from_utf8(selection.accepted->root) / "records";
+            input_file = addon::usage_cache_io_path(addon::path_from_utf8(selection.accepted->root)) / "records";
         }
     }
     else {

@@ -196,8 +196,13 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
         request.snapshot_id.reset();
         request.cursor.reset();
         request.mode = "incremental";
-        const auto path = storage / name;
-        check(fs::create_directory(path), "host exclusively allocates candidate directory");
+        auto parent = storage;
+        while (parent.native().size() < 291) {
+            parent /= "retained-account-cache-allocation-component";
+        }
+        const auto path = parent / name;
+        check(fs::create_directories(addon::usage_cache_io_path(path)),
+            "host exclusively allocates long candidate directory");
         request.cache_selection = addon::Usage_cache_selection{std::move(accepted), addon::path_to_utf8(path)};
     };
     const auto validate = [&](const addon::Usage_cache_reference& reference) {
@@ -301,7 +306,8 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     check(total(all_pages(old_request, 2)) == 2700, "v3 scans and reset leave v2 cache untouched");
 
     select("occupied", first.cache_candidate);
-    write(addon::path_from_utf8(request.cache_selection->candidate_root) / "foreign", "occupied");
+    write(addon::usage_cache_io_path(addon::path_from_utf8(request.cache_selection->candidate_root) / "foreign"),
+        "occupied");
     check(outcome_for(request, 3).status != addon::Host_status::SUCCESS,
         "provider refuses a nonempty host allocation");
     validate(*first.cache_candidate);
@@ -328,7 +334,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     validate(*first.cache_candidate);
 
     select("corrupt-input", first.cache_candidate);
-    write(addon::path_from_utf8(first.cache_candidate->root) / "unlisted", "unexpected");
+    write(addon::usage_cache_io_path(addon::path_from_utf8(first.cache_candidate->root) / "unlisted"), "unexpected");
     check(outcome_for(request, 3).status != addon::Host_status::SUCCESS,
         "corrupt selected inventory fails without fallback");
     check(host.shutdown(1000, nullptr), "packaged adapter exits without contacting a model");
