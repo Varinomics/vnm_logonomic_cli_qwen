@@ -147,6 +147,7 @@ addon::Usage_scan_request request_for(const fs::path& home)
 Context invoke(const addon::Usage_scan_request& request)
 {
     Context context;
+    context.invocation.capability = {"usage-scan", 2};
     context.invocation.operation = "scan";
     context.invocation.payload = addon::encode_usage_scan_request(request, 2);
     qwen::handle_usage(context);

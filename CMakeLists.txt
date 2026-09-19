@@ -112,6 +112,13 @@ add_test(NAME qwen_acp_tests COMMAND qwen_acp_tests)
 add_test(NAME qwen_package_validation COMMAND logonomic_cli_addon_validate "${QWEN_PACKAGE_DIRECTORY}" --platform "${QWEN_PLATFORM}")
 add_test(NAME qwen_package_conformance COMMAND logonomic_cli_addon_conformance "${QWEN_PACKAGE_DIRECTORY}")
 set_tests_properties(qwen_contract_tests qwen_usage_tests qwen_acp_tests qwen_package_validation qwen_package_conformance PROPERTIES TIMEOUT 120)
+add_executable(qwen_usage_cache_tests tests/qwen_usage_cache_tests.cpp)
+target_link_libraries(qwen_usage_cache_tests PRIVATE qwen_provider)
+qwen_target(qwen_usage_cache_tests)
+add_dependencies(qwen_usage_cache_tests qwen_package)
+add_test(NAME qwen_usage_cache_tests
+    COMMAND qwen_usage_cache_tests "${QWEN_PACKAGE_DIRECTORY}")
+set_tests_properties(qwen_usage_cache_tests PROPERTIES TIMEOUT 180 LABELS "usage;cache;packaged-adapter")
 logonomic_cli_addon_install_package("${QWEN_PACKAGE_DIRECTORY}" logonomic.cli.qwen)
 
 add_executable(qwen_acp_causal_tests tests/qwen_acp_causal_tests.cpp)

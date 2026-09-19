@@ -152,7 +152,7 @@ int main()
     options.adapter_version = "1.0.0";
     options.capabilities = {
         {"presentation", 1}, {"launcher-discovery", 1},
-        {"accounts", 2}, {"usage-scan", 2},
+        {"accounts", 2}, {"usage-scan", 2}, {"usage-scan", 3},
         {"profile-storage", 1},
         {"launch-preparation", 3}, {"managed-configuration", 2}, {"helper-ingress", 2},
         {"lifecycle-events", 1}, {"coordination-delivery", 1},
