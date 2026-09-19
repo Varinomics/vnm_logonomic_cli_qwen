@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "capability_id": "presentation",
+  "payload": {
+    "display_name": "Qwen Code",
+    "icon": {
+      "dark": "assets/qwen.svg",
+      "light": "assets/qwen.svg"
+    }
+  }
+}

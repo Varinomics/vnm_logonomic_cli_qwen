@@ -1,0 +1,15 @@
+{
+  "capability_id": "environment-bootstrap",
+  "version": 1,
+  "payload": {
+    "environment_names": [
+      "QWEN_HOME",
+      "QWEN_RUNTIME_DIR",
+      "QWEN_CODE_MCP_APPROVALS_PATH",
+      "QWEN_CODE_TRUSTED_FOLDERS_PATH"
+    ],
+    "home_environment_name": "QWEN_HOME",
+    "default_home_relative_path": ".qwen",
+    "dotenv_relative_path": ".env"
+  }
+}

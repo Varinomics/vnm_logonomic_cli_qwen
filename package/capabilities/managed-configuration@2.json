@@ -1,0 +1,11 @@
+{
+  "capability_id": "managed-configuration",
+  "version": 2,
+  "payload": {
+    "environment_name": "QWEN_HOME",
+    "relative_path": "settings.json",
+    "default_home_relative_path": ".qwen",
+    "selector_policy": "raw-tilde",
+    "default_home_policy": "home-or-temp"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "bootstrap_version": 1,
+  "package_id": "logonomic.cli.qwen",
+  "release_version": "@PROJECT_VERSION@",
+  "platforms": ["@QWEN_PLATFORM@"],
+  "adapter": {
+    "path": {"@QWEN_PLATFORM@": "adapter/qwen_adapter@CMAKE_EXECUTABLE_SUFFIX@"},
+    "argv": [],
+    "environment": {}
+  },
+  "core_protocol_generations": [1],
+  "integrity_index": "package.files.json"
+}

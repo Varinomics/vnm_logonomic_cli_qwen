@@ -1,0 +1,25 @@
+{
+  "version": 3,
+  "capability_id": "delegated-session",
+  "payload": {
+    "environment_names": [
+      "QWEN_HOME",
+      "QWEN_RUNTIME_DIR",
+      "QWEN_CODE_MCP_APPROVALS_PATH",
+      "QWEN_CODE_TRUSTED_FOLDERS_PATH",
+      "OPENAI_API_KEY",
+      "OPENAI_BASE_URL",
+      "OPENAI_MODEL",
+      "QWEN_CODE_SYSTEM_SETTINGS_PATH",
+      "QWEN_CODE_SYSTEM_DEFAULTS_PATH",
+      "SystemRoot",
+      "WINDIR",
+      "TEMP",
+      "TMP",
+      "NODE_OPTIONS"
+    ],
+    "purposes": [
+      "implementation"
+    ]
+  }
+}

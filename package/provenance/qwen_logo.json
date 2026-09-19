@@ -1,0 +1,15 @@
+{
+  "upstream": "https://github.com/QwenLM/qwen-code",
+  "snapshot": "6a211b465227dd35ad3c35a2dcb86a809590bcd0",
+  "source_path": "packages/desktop-shell/bootstrap/qwen-code-logo.svg",
+  "notice": "notices/qwen-LICENSE.txt",
+  "resources": ["assets/qwen.svg", "notices/qwen-NOTICE.txt"],
+  "upstream_notice": {
+    "source_path": "packages/desktop-shell/NOTICE",
+    "resource": "notices/qwen-NOTICE.txt",
+    "source_sha256": "63ec46cba8da7cf6c99dc6faef3d96f23e79bb42423f67c5d3fde86dc004d67c",
+    "changes": "Copied without modification. Its distribution and Node.js statements describe the upstream desktop shell; this add-on does not bundle the Node.js runtime."
+  },
+  "changes": ["Renamed qwen-code-logo.svg to qwen.svg; SVG bytes are unchanged."],
+  "source_sha256": "f7e324607c3f657953977d2742fbb8a3a0a354a13736671d27bfb906e9d1f3f2"
+}
