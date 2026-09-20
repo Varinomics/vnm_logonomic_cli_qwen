@@ -109,6 +109,16 @@ void invoke(addon::Invocation_context& context)
             qwen::handle_usage(context);
         }
         else
+        if (capability == addon::k_attention_kind_capability_id && request.operation == addon::k_classify_event_operation) {
+            addon::Contract_failure failure;
+            const auto decoded = addon::decode_attention_classification_request(request.payload, &failure);
+            if (!decoded) {
+                context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
+                return;
+            }
+            context.succeed(addon::encode_attention_classification_result(qwen::classify_attention(*decoded)));
+        }
+        else
         if (capability == "helper-ingress" && request.operation == addon::k_classify_event_operation) {
             addon::Contract_failure failure;
             const auto decoded = addon::decode_classify_event_request(request.payload, &failure);
@@ -157,6 +167,7 @@ int main()
         {"launch-preparation", 3}, {"managed-configuration", 2}, {"helper-ingress", 2},
         {"lifecycle-events", 1}, {"coordination-delivery", 1},
         {"model-context-delivery", 1},
+        {addon::k_attention_kind_capability_id, addon::k_attention_kind_version},
         {"environment-bootstrap", 1},
         {"structured-session", 3}, {"delegated-session", 3}, {"interactive-resume", 2},
     };

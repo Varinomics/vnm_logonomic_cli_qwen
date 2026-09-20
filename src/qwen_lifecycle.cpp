@@ -116,4 +116,22 @@ addon::Classify_event_result classify_event(const addon::Classify_event_request&
     return result;
 }
 
+addon::Attention_classification_result classify_attention(const addon::Attention_classification_request& request)
+{
+    addon::Attention_classification_result result{classify_event(request.base), std::nullopt};
+    if (request.base.event.name != "Notification" || result.base.observations.size() != 1 ||
+        result.base.observations.front().attention_transition != addon::Attention_transition::REQUESTED)
+    {
+        return result;
+    }
+    const auto notification = text(request.base.event.body, "notification_type");
+    if (notification == "permission_prompt" || notification == "elicitation_dialog") {
+        // Native notifications carry no paired question identity or answer.
+        // Label the existing inferred observation without upgrading its evidence.
+        result.attention_kind = addon::Attention_kind{0,
+            notification == "permission_prompt" ? "permission" : "interactive_question"};
+    }
+    return result;
+}
+
 } // namespace qwen

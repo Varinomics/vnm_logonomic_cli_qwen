@@ -2,6 +2,11 @@
 #include "qwen_launcher.h"
 #include "qwen_lifecycle.h"
 
+#include <logonomic_cli_addon/host_simulator.h>
+#include <logonomic_cli_addon/ids.h>
+#include <logonomic_cli_addon/package_source.h>
+
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -144,15 +149,119 @@ bool lifecycle_contract()
     return ok;
 }
 
+bool attention_contract(const std::filesystem::path& package, const std::filesystem::path& root)
+{
+    addon::Simulator_options options;
+    options.package_directory = package;
+    options.scratch_directory = root / "scratch";
+    options.profile_storage_root = root / "profiles";
+    addon::Host_simulator host(std::move(options), nullptr);
+    addon::Contract_failure failure;
+    if (!check(host.start(&failure), "actual packaged Qwen adapter starts")) return false;
+    const auto invoke = [&](const addon::Capability_pair& capability, addon::Json_value payload) {
+        const auto id = host.invoke(capability, addon::k_classify_event_operation, std::move(payload), 15000);
+        const auto outcome = host.wait_outcome(id, 18000);
+        if (!outcome) throw std::runtime_error("packaged classification did not settle");
+        return *outcome;
+    };
+    addon::Attention_classification_request request;
+    request.base.transition_nonce = std::string(32, 'a');
+    request.base.ledger.current_epoch = 1;
+    request.base.ledger.current_transition = addon::Ledger_transition{
+        addon::Transition_kind::START, "native-session", std::string(32, 'b')};
+    request.base.event.name = "Notification";
+    request.base.event.body = qwen::object({
+        {"session_id", qwen::Json("native-session")}, {"event_id", qwen::Json("helper-delivery")},
+        {"prompt_id", qwen::Json("native-turn")}, {"message", qwen::Json("private-notification-canary?")}});
+    bool ok = true;
+    for (const auto* notification : {"permission_prompt", "elicitation_dialog"}) {
+        request.base.event.body.set("notification_type", qwen::Json(notification));
+        const auto expected = qwen::classify_attention(request);
+        const auto result = invoke({addon::k_attention_kind_capability_id, addon::k_attention_kind_version},
+            addon::encode_attention_classification_request(request));
+        const auto decoded = addon::decode_attention_classification_result(result.payload, &failure, 2);
+        if (!check(result.status == addon::Host_status::SUCCESS && decoded && decoded->attention_kind &&
+                decoded->base.observations.size() == 1, "packaged notification kind decodes")) return false;
+        const auto& observation = decoded->base.observations.front();
+        ok &= check(decoded->attention_kind->kind ==
+                (std::string(notification) == "permission_prompt" ? "permission" : "interactive_question") &&
+                decoded->attention_kind->observation_index == 0,
+            "native notification kinds remain distinct");
+        ok &= check(observation.attention_transition == addon::Attention_transition::REQUESTED &&
+                observation.attention_evidence == addon::Evidence::INFERRED && observation.attention_request_id.empty(),
+            "notification is inferred and unpaired, never a fabricated request identity");
+        ok &= check(observation.provider_event_name == "Notification" && observation.provider_event_id == "helper-delivery" &&
+                observation.provider_session_id == "native-session" && observation.provider_turn_id == "native-turn",
+            "native session/turn and helper delivery correlation survive classification");
+        const auto encoded = addon::serialize_json_canonical(result.payload);
+        ok &= check(encoded == addon::serialize_json_canonical(addon::encode_attention_classification_result(expected)) &&
+                encoded.find("private-notification-canary") == std::string::npos,
+            "packaged and local classification agree without forwarding notification prose");
+        const auto legacy = invoke({"helper-ingress", 2}, addon::encode_classify_event_request(request.base));
+        ok &= check(legacy.status == addon::Host_status::SUCCESS &&
+                addon::serialize_json_canonical(legacy.payload) ==
+                    addon::serialize_json_canonical(addon::encode_classify_event_result(decoded->base)),
+            "legacy helper ingress remains exactly the companion's unchanged base");
+    }
+    const auto no_kind = [&](const addon::Attention_classification_request& input) {
+        const auto result = invoke({addon::k_attention_kind_capability_id, addon::k_attention_kind_version},
+            addon::encode_attention_classification_request(input));
+        const auto decoded = addon::decode_attention_classification_result(result.payload, &failure, 2);
+        return check(result.status == addon::Host_status::SUCCESS && decoded && !decoded->attention_kind &&
+                addon::serialize_json_canonical(addon::encode_classify_event_result(decoded->base)) ==
+                    addon::serialize_json_canonical(addon::encode_classify_event_result(qwen::classify_event(input.base))),
+            "unsupported or unavailable notification preserves base semantics without inventing a kind");
+    };
+    auto other = request;
+    other.base.event.body.set("notification_type", qwen::Json("future_notification"));
+    ok &= no_kind(other);
+    other.base.event.body.set("notification_type", qwen::Json(17));
+    ok &= no_kind(other);
+    other = request;
+    other.base.event.body.set("agent_id", qwen::Json("native-child"));
+    ok &= no_kind(other);
+    other = request;
+    other.base.event.body.set("session_id", qwen::Json("stale-session"));
+    ok &= no_kind(other);
+    other = request;
+    other.base.event.body.erase("event_id");
+    ok &= no_kind(other);
+    for (const auto* name : {"UserPromptSubmit", "Stop", "StopFailure", "SessionEnd"}) {
+        other = request;
+        other.base.event.name = name;
+        other.pending_conversational_request_id = "host-pending-hint";
+        ok &= no_kind(other);
+        ok &= check(qwen::classify_attention(other).base.observations.front().attention_transition ==
+                addon::Attention_transition::NONE,
+            "boundary, error and Stop neither invent an answer nor classify prose as a hint");
+    }
+    auto malformed = addon::encode_attention_classification_request(request);
+    malformed.set("unknown_envelope_member", qwen::Json(true));
+    ok &= check(invoke({addon::k_attention_kind_capability_id, addon::k_attention_kind_version},
+            std::move(malformed)).status != addon::Host_status::SUCCESS,
+        "companion keeps the strict request envelope");
+    int exit_code = -1;
+    ok &= check(host.shutdown(3000, &exit_code) && exit_code == 0, "packaged adapter shuts down cleanly");
+    return ok;
+}
+
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
+    if (argc != 2) return 2;
+    const auto root = std::filesystem::temp_directory_path() / ("qwen-attention-" + addon::random_nonce_hex());
+    int result = 1;
     try {
-        return settings_contract() && lifecycle_contract() ? 0 : 1;
+        std::filesystem::create_directories(root);
+        result = settings_contract() && lifecycle_contract() && attention_contract(addon::path_from_utf8(argv[1]), root)
+            ? 0 : 1;
     }
     catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
-        return 1;
     }
+    std::error_code error;
+    std::filesystem::remove_all(root, error);
+    if (!check(!error, "notification fixture workspace removed")) result = 1;
+    return result;
 }

@@ -26,6 +26,15 @@ the turn. StopFailure confirms failure of an identified root turn. Permission
 notifications provide unpaired inferred attention. Child lifecycle tracking is
 not advertised: Qwen's child stop hook runs before its blockable completion gate.
 
+The optional `attention-kind@1` companion labels native `permission_prompt`
+notifications as `permission` and `elicitation_dialog` notifications as
+`interactive_question`. Both remain inferred and unpaired: native session and
+turn identities are preserved, the helper's delivery ID is not a question request ID, and neither signal
+proves an answer or cancellation. Base helper-ingress results are unchanged.
+The companion does not classify notification prose or Stop output as a
+conversational hint. Host presentation must retain the kind of unpaired
+attention to display this distinction.
+
 Qwen's user settings, credentials and runtime history retain their native
 locations. The shared host resolves Qwen's user `.env` bootstrap before
 selecting the profile. Managed hook installation transforms a host-granted
