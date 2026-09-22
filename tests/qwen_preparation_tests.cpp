@@ -1,8 +1,10 @@
 #include "qwen_preparation.h"
+#include "qwen_accounts.h"
 #include "qwen_profile.h"
 #include "qwen_config.h"
 #include "qwen_launcher.h"
 
+#include <logonomic_cli_addon/accounts.h>
 #include <logonomic_cli_addon/launch_preparation.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
@@ -13,6 +15,7 @@
 #include <iostream>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace {
@@ -201,12 +204,48 @@ void resume_policy(const char* executable)
 
 } // namespace
 
+void account_names()
+{
+    // Oracle: accounts@1 names an account with a filesystem profile after the
+    // profile's folder through the SDK's account_display_name.
+#ifdef _WIN32
+    const std::string platform = "windows-x86_64";
+    const std::string home     = "C:/Users/Jane Doe";
+#else
+    const std::string platform = "linux-x86_64";
+    const std::string home     = "/home/jane";
+#endif
+    const auto discovered_name = [&](const std::string& qwen_home) {
+        addon::Accounts_launcher_request request;
+        request.launcher.script_body = "qwen";
+        request.launcher.runner_key  = addon::k_runner_direct;
+        request.launch_environment.platform_id = platform;
+        request.launch_environment.bootstrap   = addon::Environment_bootstrap_evidence{qwen_home};
+        request.default_home_fallback   = home;
+        request.normalization_directory = home;
+        Context discovery;
+        discovery.m_request.operation = addon::k_accounts_discover_operation;
+        discovery.m_request.payload   = addon::encode_accounts_launcher_request(request);
+        qwen::handle_accounts(discovery);
+        addon::Contract_failure failure;
+        const auto accounts = discovery.m_result
+            ? addon::decode_accounts_result(*discovery.m_result, &failure)
+            : std::nullopt;
+        return accounts && accounts->size() == 1 ? accounts->front().display_name : std::string{};
+    };
+    require(discovered_name(home + "/.qwen-work/") == ".qwen-work",
+        "a trailing separator does not hide the profile folder's name");
+    const std::string long_home = home + "/.qwen-account-for-the-varinomics-nightly-release-builds";
+    require(discovered_name(long_home) == addon::account_display_name(long_home),
+        "an over-long folder name is fitted by the SDK's account display-name rule");
+}
+
 int main(int argc, char** argv)
 {
     if (argc == 2 && std::string(argv[1]) == "--help") {
         std::cout << "  --resume <session>\n";
         return 0;
     }
-    try { required_control_is_explicitly_unavailable(); launch_disposition(); resume_policy(argv[0]); return 0; }
+    try { required_control_is_explicitly_unavailable(); launch_disposition(); resume_policy(argv[0]); account_names(); return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

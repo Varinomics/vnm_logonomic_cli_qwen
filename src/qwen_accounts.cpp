@@ -16,8 +16,7 @@ addon::Account_record account(const resolved_profile_t& profile)
 {
     addon::Account_record result;
     result.adapter_account_key = account_key(profile.home);
-    result.display_name = path_string(profile.home.filename());
-    if (result.display_name.empty()) result.display_name = "Qwen";
+    result.display_name = addon::account_display_name(path_string(profile.home));
     result.profile_path = path_string(profile.home);
     result.status = fs::is_directory(profile.home) ? addon::Account_status::AVAILABLE : addon::Account_status::UNAVAILABLE;
     return result;
