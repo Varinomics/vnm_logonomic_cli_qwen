@@ -215,7 +215,7 @@ void account_names()
     const std::string platform = "linux-x86_64";
     const std::string home     = "/home/jane";
 #endif
-    const auto discovered_name = [&](const std::string& qwen_home) {
+    const auto discovered_account = [&](const std::string& qwen_home) -> std::optional<addon::Account_record> {
         addon::Accounts_launcher_request request;
         request.launcher.script_body = "qwen";
         request.launcher.runner_key  = addon::k_runner_direct;
@@ -231,13 +231,25 @@ void account_names()
         const auto accounts = discovery.m_result
             ? addon::decode_accounts_result(*discovery.m_result, &failure)
             : std::nullopt;
-        return accounts && accounts->size() == 1 ? accounts->front().display_name : std::string{};
+        return accounts && accounts->size() == 1 ? std::optional(accounts->front()) : std::nullopt;
+    };
+    const auto discovered_name = [&](const std::string& qwen_home) {
+        const auto account = discovered_account(qwen_home);
+        return account ? account->display_name : std::string{};
     };
     require(discovered_name(home + "/.qwen-work/") == ".qwen-work",
         "a trailing separator does not hide the profile folder's name");
     const std::string long_home = home + "/.qwen-account-for-the-varinomics-nightly-release-builds";
     require(discovered_name(long_home) == addon::account_display_name(long_home),
         "an over-long folder name is fitted by the SDK's account display-name rule");
+#ifdef _WIN32
+    // A profile on a share that cannot be reached is an unavailable account;
+    // it must not fail the discovery of every account.
+    const auto unreachable = discovered_account("\\\\localhost\\logonomic-absent-share\\");
+    require(unreachable && unreachable->display_name == "\\\\localhost\\logonomic-absent-share" &&
+        unreachable->status == addon::Account_status::UNAVAILABLE,
+        "a profile on an unreachable share is discovered as an unavailable account");
+#endif
 }
 
 int main(int argc, char** argv)

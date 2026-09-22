@@ -5,6 +5,7 @@
 #include <logonomic_cli_addon/accounts.h>
 
 #include <stdexcept>
+#include <system_error>
 
 namespace qwen {
 namespace {
@@ -18,7 +19,12 @@ addon::Account_record account(const resolved_profile_t& profile)
     result.adapter_account_key = account_key(profile.home);
     result.display_name = addon::account_display_name(path_string(profile.home));
     result.profile_path = path_string(profile.home);
-    result.status = fs::is_directory(profile.home) ? addon::Account_status::AVAILABLE : addon::Account_status::UNAVAILABLE;
+    // A profile that cannot be checked, such as one on an unreachable share, is
+    // an unavailable account: it must not fail the discovery of every account.
+    std::error_code error;
+    result.status = fs::is_directory(profile.home, error)
+        ? addon::Account_status::AVAILABLE
+        : addon::Account_status::UNAVAILABLE;
     return result;
 }
 
