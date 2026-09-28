@@ -107,11 +107,14 @@ installation. The npm route uses `@qwen-code/qwen-code` and the Node requirement
 declared by its current package. The adapter probes required command options at
 runtime; it does not impose a maximum CLI version or pin a model.
 
-Structured and resume preparation require a direct Qwen launcher with plain
-model/authentication/approval options. Shell scripts with unrelated commands
-are not reconstructed into structured executions. Windows script shims retain
-their selected script and run through PowerShell; arguments that cannot safely
-survive a `.cmd` expansion are refused.
+Structured preparation requires a direct Qwen launcher with plain
+model/authentication/approval options. Resume also accepts the host's Windows
+PowerShell command launcher when its script is a plain Qwen invocation with
+those options. PowerShell resolves the selected Qwen file and evaluates its
+literal argument expressions during resume; dynamic expressions and unrelated
+commands are refused. A quoted executable path requires PowerShell's `&` call
+operator. Windows script shims retain their selected script and run through
+PowerShell; arguments that cannot safely survive a `.cmd` expansion are refused.
 
 ## Building and qualification
 

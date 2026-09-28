@@ -39,25 +39,6 @@ bool bootstrap_available(const std::optional<addon::Launch_environment>& environ
     return false;
 }
 
-bool plain_session_options(const std::vector<std::string>& argv)
-{
-    for (std::size_t index = 1; index < argv.size(); ++index) {
-        const auto& option = argv[index];
-        if (option == "--debug" || option == "-d" || option == "--yolo" || option == "-y") {
-            continue;
-        }
-        if (option == "--model" || option == "-m" || option == "--approval-mode" ||
-            option == "--openai-api-key" || option == "--openai-base-url")
-        {
-            if (++index < argv.size() && !argv[index].empty()) {
-                continue;
-            }
-        }
-        return false;
-    }
-    return true;
-}
-
 void prepare_launch(addon::Invocation_context& invocation)
 {
     addon::Contract_failure failure;
@@ -74,9 +55,23 @@ void prepare_launch(addon::Invocation_context& invocation)
     patch.account_context = request->account_context;
     const auto environment = environment_pairs(request->launch_environment->effective_environment);
     const bool direct = request->launcher.runner_key == "direct";
-    if ((direct && !selected_command(request->launcher, request->launcher_argv, environment, request->working_directory)) ||
-        (!direct && !is_qwen_invocation(request->launcher_argv)))
-    {
+    bool admitted = false;
+    if (direct) {
+        admitted = selected_command(request->launcher, request->launcher_argv,
+            environment, request->working_directory).has_value();
+    }
+#ifdef _WIN32
+    else
+    if (request->launcher.runner_key == addon::k_runner_powershell) {
+        const auto selected = inspect_powershell_launcher(request->launcher, request->launcher_argv,
+            environment, request->working_directory, invocation);
+        admitted = selected.has_value();
+    }
+#endif
+    else {
+        admitted = is_qwen_invocation(request->launcher_argv);
+    }
+    if (!admitted) {
         patch.disposition = addon::Launch_disposition{false, false, false};
         invocation.succeed(addon::encode_launch_patch(patch, 3));
         return;
@@ -202,13 +197,29 @@ void prepare_resume(addon::Invocation_context& invocation)
         return;
     }
     static const std::regex uuid("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
-    if (!exact_keys(request->resume_record, {"provider_session_id"}) || !std::regex_match(session, uuid) ||
+    if (!exact_keys(request->resume_record, {"provider_session_id"}) || !std::regex_match(session, uuid)) {
+        invocation.fail(addon::Result_status::UNAVAILABLE, "resume_selector_unavailable");
+        return;
+    }
+    const auto profile = profile_for_context(request->context);
+#ifdef _WIN32
+    std::optional<Powershell_selection> powershell;
+    if (request->context.launcher.runner_key == addon::k_runner_powershell) {
+        powershell = inspect_powershell_launcher(request->context.launcher, request->context.launcher_argv,
+            profile.environment, request->context.working_directory, invocation);
+        if (!powershell) {
+            invocation.fail(addon::Result_status::UNAVAILABLE, "resume_selector_unavailable");
+            return;
+        }
+    }
+    else
+#endif
+    if (request->context.launcher.runner_key != addon::k_runner_direct ||
         !plain_session_options(request->context.launcher_argv))
     {
         invocation.fail(addon::Result_status::UNAVAILABLE, "resume_selector_unavailable");
         return;
     }
-    const auto profile = profile_for_context(request->context);
     const auto config = profile.home / "settings.json";
     std::error_code error;
     if (fs::file_size(config, error) > 768 * 1024 || error) {
@@ -221,11 +232,24 @@ void prepare_resume(addon::Invocation_context& invocation)
         invocation.fail(addon::Result_status::UNAVAILABLE, "managed_hooks_unavailable");
         return;
     }
-    auto command = verified_command(request->context.launcher, request->context.launcher_argv,
-        profile.environment, request->context.working_directory, "--resume", invocation);
-    if (command) {
-        command->insert(command->end(), {"--resume", session});
-        command = platform_command(*command, profile.environment, request->context.working_directory);
+    std::optional<std::vector<std::string>> command;
+#ifdef _WIN32
+    if (powershell) {
+        if (selected_program_supports(powershell->program, profile.environment,
+            request->context.working_directory, "--resume", invocation))
+        {
+            command = powershell_resume_command(*powershell, session);
+        }
+    }
+    else
+#endif
+    {
+        command = verified_command(request->context.launcher, request->context.launcher_argv,
+            profile.environment, request->context.working_directory, "--resume", invocation);
+        if (command) {
+            command->insert(command->end(), {"--resume", session});
+            command = platform_command(*command, profile.environment, request->context.working_directory);
+        }
     }
     if (!command) {
         invocation.fail(invocation.cancel_requested() ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,

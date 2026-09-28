@@ -42,7 +42,8 @@ void discover(addon::Invocation_context& context)
             return;
         }
         addon::Launcher_recognition result;
-        result.recognized = qwen::recognize_launcher(request->launcher.script_body);
+        result.recognized = qwen::recognize_launcher(request->launcher,
+            qwen::environment_pairs(request->ambient_environment), {}, context);
         if (result.recognized) {
             result.display_name = "Qwen Code";
         }

@@ -3,9 +3,12 @@
 #include "qwen_profile.h"
 #include "qwen_config.h"
 #include "qwen_launcher.h"
+#include "qwen_json.h"
 
 #include <logonomic_cli_addon/accounts.h>
+#include <logonomic_cli_addon/host_simulator.h>
 #include <logonomic_cli_addon/launch_preparation.h>
+#include <logonomic_cli_addon/launcher_discovery.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
 
@@ -44,6 +47,34 @@ void require(bool condition, const char* description)
 {
     if (!condition) throw std::runtime_error(description);
 }
+
+#ifdef _WIN32
+std::string powershell_quote(std::string value)
+{
+    std::string result = "'";
+    for (const char character : value) {
+        result += character;
+        if (character == '\'') result += '\'';
+    }
+    return result + "'";
+}
+
+addon::Json_value run_resume_process(const addon::Resume_prepare_result& result,
+    const addon::Resume_prepare_request& request, const std::filesystem::path& executable)
+{
+    auto command = std::vector<std::string>{addon::path_to_utf8(executable.parent_path() / "qwen_launch_bridge.exe")};
+    command.insert(command.end(), result.process.argv.begin(), result.process.argv.end());
+    Context context;
+    const auto output = qwen::probe(command, result.patch.set, request.context.working_directory, 10000, context);
+    require(output.has_value(), "the proposed bridge and PowerShell command must complete");
+    std::ifstream input(addon::path_from_utf8(request.context.account_context->profile_path.value()) / "capture.json",
+        std::ios::binary);
+    const std::string content{std::istreambuf_iterator<char>(input), {}};
+    const auto capture = addon::parse_json(content, {}, nullptr);
+    require(capture.has_value(), "the fake Qwen child must record its executable, arguments and profile");
+    return *capture;
+}
+#endif
 
 void required_control_reaches_native_admission(const char* executable)
 {
@@ -154,21 +185,44 @@ void required_control_reaches_native_admission(const char* executable)
         "Task servers are never launched without the host relay");
 }
 
-void launch_disposition()
+void launch_disposition(const char* executable)
 {
     // Oracle: the launch-preparation@3 decoder requires explicit feature
     // admission. Exercise the actual provider producer without running a CLI.
     addon::Prepare_request request;
     request.working_directory = addon::path_to_utf8(std::filesystem::current_path());
-    request.launcher = {"qwen", "bash", ""};
+#ifdef _WIN32
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() / ("qwen-launch-" + addon::random_nonce_hex());
+    fs::create_directories(root / "selected");
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{root};
+    fs::copy_file(fs::absolute(executable), root / "qwen.exe");
+    request.launcher = {"qwen --model 'selected-model' --approval-mode 'default'", addon::k_runner_powershell, ""};
+    request.launcher_argv = {"powershell.exe", "-NoLogo", "-Command", request.launcher.script_body};
+    request.working_directory = addon::path_to_utf8(root);
+#else
+    (void)executable;
+    request.launcher = {"qwen", addon::k_runner_bash, ""};
     request.launcher_argv = {"bash", "-c", "qwen"};
+#endif
     addon::Launch_environment environment;
 #ifdef _WIN32
     environment.platform_id = "windows-x86_64";
 #else
     environment.platform_id = "linux-x86_64";
 #endif
+#ifdef _WIN32
+    const auto home = addon::path_to_utf8(root / "selected");
+    environment.effective_environment.set("PATH", addon::Json_value(
+        addon::path_to_utf8(root) + ";" + (std::getenv("PATH") ? std::getenv("PATH") : "")));
+    for (const auto* name : {"SystemRoot", "SystemDrive", "PATHEXT", "ComSpec"}) {
+        if (const auto* value = std::getenv(name)) {
+            environment.effective_environment.set(name, addon::Json_value(value));
+        }
+    }
+#else
     const auto home = addon::path_to_utf8(std::filesystem::current_path() / ".qwen-profile");
+#endif
     environment.effective_environment.set("QWEN_HOME", addon::Json_value(home));
     environment.bootstrap = addon::Environment_bootstrap_evidence{home};
     request.launch_environment = environment;
@@ -176,7 +230,11 @@ void launch_disposition()
     for (const bool prepared : {true, false}) {
         if (!prepared) {
             request.launcher.script_body = "echo unrelated";
+#ifdef _WIN32
+            request.launcher_argv.back() = request.launcher.script_body;
+#else
             request.launcher_argv = {"bash", "-c", "echo unrelated"};
+#endif
         }
         Context context;
         context.m_request.capability = {"launch-preparation", 3};
@@ -197,6 +255,21 @@ void launch_disposition()
         if (!prepared) require(patch->set.empty() && patch->unset.empty() && !patch->argv,
             "unmanaged preparation must preserve the native launch");
     }
+#ifdef _WIN32
+    for (const auto& script : {"'qwen.exe' --model selected-model", "qwen --model $env:SELECTED_MODEL"}) {
+        request.launcher.script_body = script;
+        request.launcher_argv.back() = script;
+        Context context;
+        context.m_request.capability = {"launch-preparation", 3};
+        context.m_request.operation = "prepare";
+        context.m_request.payload = addon::encode_prepare_request(request, 3);
+        qwen::handle_preparation(context);
+        addon::Contract_failure failure;
+        const auto patch = context.m_result ? addon::decode_launch_patch(*context.m_result, &failure, 3) : std::nullopt;
+        require(patch && patch->disposition && !patch->disposition->prepared,
+            "invalid or dynamic PowerShell launchers must not be offered structured preparation");
+    }
+#endif
 }
 
 void resume_policy(const char* executable)
@@ -231,7 +304,7 @@ void resume_policy(const char* executable)
 #endif
     environment.effective_environment.set("QWEN_HOME", addon::Json_value(home));
     environment.effective_environment.set("OPENAI_API_KEY", addon::Json_value("frozen-fixture-key"));
-    for (const auto* name : {"SystemRoot", "PATH"}) {
+    for (const auto* name : {"SystemRoot", "SystemDrive", "PATH", "PATHEXT", "ComSpec"}) {
         if (const auto* value = std::getenv(name)) {
             environment.effective_environment.set(name, addon::Json_value(value));
         }
@@ -251,6 +324,193 @@ void resume_policy(const char* executable)
     require(result->process.argv.back() == "019933a1-6e43-7102-a520-b3c8294cc763" &&
         addon::validate_resume_acknowledgment(request.resume_record, result->acknowledgment, &failure),
         "resume must preserve the selected native session identity");
+#ifdef _WIN32
+    const auto direct_capture = run_resume_process(*result, request, fs::absolute(executable));
+    const auto* direct_arguments = direct_capture.find("argv");
+    require(direct_arguments && direct_arguments->is_array() &&
+        addon::path_from_utf8(qwen::text(direct_capture, "executable")) == fs::absolute(fake) &&
+        qwen::text(direct_capture, "profile") == home &&
+        direct_arguments->as_array() == addon::Json_value::Array{
+            addon::Json_value("--resume"), addon::Json_value("019933a1-6e43-7102-a520-b3c8294cc763")},
+        "direct resume must execute the selected Qwen file with its profile and exact ID");
+    std::cout << "direct resume child=" << qwen::text(direct_capture, "executable")
+        << " profile=" << qwen::text(direct_capture, "profile")
+        << " argv=" << addon::serialize_json(*direct_arguments) << '\n';
+    const auto shims = root / "shims";
+    fs::create_directories(shims);
+    {
+        std::ofstream script(shims / "qwen.ps1");
+        script << "Set-Content -LiteralPath (Join-Path $env:QWEN_HOME 'resolved.txt') -Value 'ps1'\n"
+            << "& " << powershell_quote(addon::path_to_utf8(fake)) << " @args\n"
+            << "exit $LASTEXITCODE\n";
+        std::ofstream batch(shims / "qwen.cmd");
+        batch << "@echo off\r\n"
+            << "echo cmd> \"%QWEN_HOME%\\resolved.txt\"\r\n"
+            << "\"" << addon::path_to_utf8(fake) << "\" %*\r\n";
+    }
+    environment.effective_environment.set("PATH", addon::Json_value(
+        addon::path_to_utf8(shims) + ";" + (std::getenv("PATH") ? std::getenv("PATH") : "")));
+    request.context.launch_environment = environment;
+    const std::string session_id = "019933a1-6e43-7102-a520-b3c8294cc763";
+    const std::string upstream_script = "& " + powershell_quote(addon::path_to_utf8(shims / "qwen.ps1")) +
+        " --model 'selected-model'";
+    {
+        addon::Simulator_options options;
+        options.package_directory = fs::absolute(executable).parent_path() / "package" / "logonomic.cli.qwen";
+        options.scratch_directory = root / "adapter-scratch";
+        options.profile_storage_root = root / "adapter-profiles";
+        addon::Host_simulator host(std::move(options), nullptr);
+        addon::Contract_failure startup_failure;
+        require(host.start(&startup_failure), "packaged Qwen adapter must start for upstream admission");
+        const auto invoke = [&](const addon::Capability_pair& capability, const char* operation,
+            addon::Json_value payload) {
+            const auto id = host.invoke(capability, operation, std::move(payload), 15000);
+            const auto outcome = host.wait_outcome(id, 18000);
+            require(outcome.has_value() && outcome->status == addon::Host_status::SUCCESS,
+                "packaged upstream invocation must settle successfully");
+            return outcome->payload;
+        };
+        addon::Launcher_request selected_launcher{upstream_script, addon::k_runner_powershell, ""};
+        const addon::Launcher_discovery_declaration declaration{{"QWEN_HOME", "SystemRoot"}};
+        const auto ambient = addon::ambient_view(qwen::environment_pairs(environment.effective_environment),
+            declaration, environment.platform_id);
+        const auto recognition_payload = invoke({"launcher-discovery", 1}, "recognize",
+            addon::encode_recognize_request(selected_launcher, ambient, environment.platform_id));
+        const auto recognition = addon::decode_recognize_result(recognition_payload, &failure);
+        addon::Accounts_launcher_request account_request;
+        account_request.launcher = selected_launcher;
+        account_request.launch_environment = environment;
+        account_request.default_home_fallback = home;
+        account_request.normalization_directory = addon::path_to_utf8(root);
+        const auto discovery_payload = invoke({"accounts", 2}, "discover",
+            addon::encode_accounts_launcher_request(account_request));
+        const auto accounts = addon::decode_accounts_result(discovery_payload, &failure);
+        const auto resolution_payload = invoke({"accounts", 2}, "resolve",
+            addon::encode_accounts_launcher_request(account_request));
+        const auto resolution = addon::decode_account_resolution_result(resolution_payload, &failure);
+        std::cout << "call-operator upstream provider=" << (recognition && recognition->recognized)
+            << " discovered=" << (accounts ? accounts->size() : 0)
+            << " resolved=" << (resolution && resolution->adapter_account_key
+                ? *resolution->adapter_account_key : "absent") << '\n';
+        require(recognition && recognition->recognized && recognition->display_name == "Qwen Code" &&
+            accounts && accounts->size() == 1 && accounts->front().adapter_account_key ==
+                request.context.account_context->adapter_account_key &&
+            resolution && resolution->adapter_account_key == request.context.account_context->adapter_account_key,
+            "supported PowerShell launcher must retain provider and account identity upstream");
+        selected_launcher.script_body = "qwen";
+        account_request.launcher = selected_launcher;
+        const auto bare_recognition = addon::decode_recognize_result(
+            invoke({"launcher-discovery", 1}, "recognize",
+                addon::encode_recognize_request(selected_launcher, ambient, environment.platform_id)), &failure);
+        const auto bare_resolution = addon::decode_account_resolution_result(
+            invoke({"accounts", 2}, "resolve", addon::encode_accounts_launcher_request(account_request)), &failure);
+        require(bare_recognition && bare_recognition->recognized && bare_resolution &&
+            bare_resolution->adapter_account_key == request.context.account_context->adapter_account_key,
+            "bare PowerShell Qwen must retain provider and account identity upstream");
+        std::cout << "bare upstream provider=1 resolved=" << *bare_resolution->adapter_account_key << '\n';
+        for (const auto& script : {
+                powershell_quote(addon::path_to_utf8(shims / "qwen.ps1")) + " --model selected-model",
+                std::string("qwen --model $env:SELECTED_MODEL"),
+                std::string("qwen --model selected-model | Out-Null"),
+                std::string("qwen --unsupported-option")})
+        {
+            selected_launcher.script_body = script;
+            account_request.launcher = selected_launcher;
+            const auto rejected_recognition = addon::decode_recognize_result(
+                invoke({"launcher-discovery", 1}, "recognize",
+                    addon::encode_recognize_request(selected_launcher, ambient, environment.platform_id)), &failure);
+            const auto rejected_resolution = addon::decode_account_resolution_result(
+                invoke({"accounts", 2}, "resolve", addon::encode_accounts_launcher_request(account_request)), &failure);
+            require(rejected_recognition && !rejected_recognition->recognized && rejected_resolution &&
+                !rejected_resolution->adapter_account_key,
+                "invalid or dynamic PowerShell scripts must be refused before preparation");
+            std::cout << "upstream rejected script=" << script << '\n';
+        }
+    }
+    int failures = 0;
+    const auto run_case = [&](const char* name, const std::string& script,
+        const std::vector<std::string>& expected, bool shim) {
+        try {
+            std::error_code ignored;
+            fs::remove(root / "selected" / "capture.json", ignored);
+            fs::remove(root / "selected" / "resolved.txt", ignored);
+            request.context.launcher = {script, addon::k_runner_powershell, ""};
+            request.context.launcher_argv = {"powershell.exe", "-NoLogo", "-Command", script};
+            Context shell_context;
+            shell_context.m_request = {"resume", {"interactive-resume", 2}, "prepare_resume",
+                addon::encode_resume_prepare_request(request, 2)};
+            qwen::handle_preparation(shell_context);
+            const auto prepared = addon::decode_resume_prepare_result(*shell_context.m_result, &failure, 2);
+            require(prepared && addon::validate_resume_process_proposal(prepared->process, &failure) &&
+                addon::validate_resume_acknowledgment(request.resume_record, prepared->acknowledgment, &failure),
+                "resume proposal and exact record acknowledgment must satisfy the SDK");
+            const auto capture = run_resume_process(*prepared, request, fs::absolute(executable));
+            const auto* arguments = capture.find("argv");
+            require(arguments && arguments->is_array() &&
+                addon::path_from_utf8(qwen::text(capture, "executable")) == fs::absolute(fake) &&
+                qwen::text(capture, "profile") == home,
+                "the fake child must retain its executable and Qwen profile");
+            std::vector<std::string> actual;
+            for (const auto& item : arguments->as_array()) {
+                require(item.is_string(), "captured child arguments must be strings");
+                actual.push_back(item.as_string());
+            }
+            require(actual == expected, "PowerShell must deliver the selected arguments and exact resume ID");
+            if (shim) {
+                std::ifstream marker(root / "selected" / "resolved.txt");
+                std::string selected;
+                marker >> selected;
+                require(selected == "ps1", "bare Qwen must use PowerShell's selected script, not the cmd shim");
+            }
+            std::cout << name << " child=" << qwen::text(capture, "executable")
+                << " profile=" << qwen::text(capture, "profile")
+                << " argv=" << addon::serialize_json(*arguments)
+                << " selection=" << (shim ? "powershell-qwen.ps1" : "call-operator-qwen.exe") << '\n';
+        }
+        catch (const std::exception& error) {
+            std::cerr << name << ": " << error.what() << '\n';
+            ++failures;
+        }
+    };
+    const auto reject_case = [&](const char* name, const std::string& script) {
+        request.context.launcher = {script, addon::k_runner_powershell, ""};
+        request.context.launcher_argv = {"powershell.exe", "-NoLogo", "-Command", script};
+        Context shell_context;
+        shell_context.m_request = {"resume", {"interactive-resume", 2}, "prepare_resume",
+            addon::encode_resume_prepare_request(request, 2)};
+        try {
+            qwen::handle_preparation(shell_context);
+            std::cerr << name << ": invalid or dynamic PowerShell script was accepted\n";
+            ++failures;
+        }
+        catch (const std::runtime_error& error) {
+            if (std::string(error.what()) != "resume_selector_unavailable") {
+                std::cerr << name << ": " << error.what() << '\n';
+                ++failures;
+            }
+            else {
+                std::cout << name << " rejected=resume_selector_unavailable\n";
+            }
+        }
+    };
+    run_case("bare qwen", "qwen", {"--resume", session_id}, true);
+    run_case("bare single quotes", "qwen --model 'selected-model' --approval-mode 'default'"
+        " --openai-base-url 'http://127.0.0.1:18111/v1' --openai-api-key 'fixture-auth'",
+        {"--model", "selected-model", "--approval-mode", "default",
+            "--openai-base-url", "http://127.0.0.1:18111/v1",
+            "--openai-api-key", "fixture-auth", "--resume", session_id}, true);
+    run_case("parenthesized approval", "qwen --approval-mode ('default')",
+        {"--approval-mode", "default", "--resume", session_id}, true);
+    run_case("call operator", "& " + powershell_quote(addon::path_to_utf8(fake)) + " --model 'selected-model'",
+        {"--model", "selected-model", "--resume", session_id}, false);
+    run_case("call operator script", upstream_script,
+        {"--model", "selected-model", "--resume", session_id}, true);
+    reject_case("quoted head without call operator", powershell_quote(addon::path_to_utf8(fake)) +
+        " --model 'selected-model'");
+    reject_case("dynamic value", "qwen --model $env:SELECTED_MODEL");
+    reject_case("unrelated pipeline", "qwen --model selected | Out-Null");
+    require(failures == 0, "PowerShell resume boundary cases must match the installed shell");
+#endif
 }
 
 } // namespace
@@ -305,10 +565,27 @@ void account_names()
 
 int main(int argc, char** argv)
 {
+    if (qwen::base_name(argv[0]) == "qwen") {
+        if (argc == 2 && std::string(argv[1]) == "--help") {
+            std::cout << "  --resume <session>\n  --acp\n";
+            return 0;
+        }
+        const char* home = std::getenv("QWEN_HOME");
+        if (!home) return 2;
+        addon::Json_value capture = addon::Json_value::object();
+        capture.set("executable", addon::Json_value(addon::path_to_utf8(std::filesystem::absolute(argv[0]))));
+        capture.set("profile", addon::Json_value(home));
+        addon::Json_value arguments = addon::Json_value::array();
+        for (int index = 1; index < argc; ++index) arguments.as_array().push_back(addon::Json_value(argv[index]));
+        capture.set("argv", std::move(arguments));
+        std::ofstream output(addon::path_from_utf8(home) / "capture.json", std::ios::binary);
+        output << addon::serialize_json(capture);
+        return output ? 0 : 3;
+    }
     if (argc == 2 && std::string(argv[1]) == "--help") {
         std::cout << "  --resume <session>\n  --acp\n";
         return 0;
     }
-    try { required_control_reaches_native_admission(argv[0]); launch_disposition(); resume_policy(argv[0]); account_names(); return 0; }
+    try { required_control_reaches_native_admission(argv[0]); launch_disposition(argv[0]); resume_policy(argv[0]); account_names(); return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

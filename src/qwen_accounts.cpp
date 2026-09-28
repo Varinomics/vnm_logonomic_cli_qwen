@@ -43,7 +43,9 @@ void handle_accounts(addon::Invocation_context& context)
         context.fail(addon::Result_status::UNAVAILABLE, "environment_bootstrap_unavailable");
         return;
     }
-    if (!recognize_launcher(input->launcher.script_body)) {
+    if (!recognize_launcher(input->launcher,
+        environment_pairs(input->launch_environment.effective_environment),
+        input->normalization_directory, context)) {
         context.succeed(context.request().operation == "discover" ? addon::encode_accounts({}) : addon::encode_account_resolution({}));
         return;
     }
