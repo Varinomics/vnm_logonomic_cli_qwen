@@ -120,7 +120,6 @@ std::optional<addon::Process_proposal> acp_process(
     result.argv = std::move(*command);
     result.environment = profile.environment;
     result.stdin_behavior = addon::Stdin_behavior::PAYLOAD;
-    result.stdin_payload = initial_acp_input(request);
     return result;
 }
 
@@ -143,6 +142,7 @@ void prepare_structured(addon::Invocation_context& invocation)
     }
     addon::Structured_prepare_result result;
     result.process = *process;
+    result.process.stdin_payload = initial_acp_input(*request);
     result.profile_storage = request->context.profile_storage;
     result.account_context = request->context.account_context;
     result.inspection = {true, initial_acp_state(request->prompt), true};
@@ -157,19 +157,9 @@ void prepare_delegated(addon::Invocation_context& invocation)
         invocation.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
         return;
     }
-    // Containment, not native qualification: configuration or mode
-    // acknowledgment does not prove required actions entered the dispatcher.
-    // The host requires nonempty actions, so this refuses all host delegation
-    // before native probes, process proposals or task bytes can be produced.
-    // Remove this boundary only with an integrated native admission contract.
-    for (const auto& server : request->control.servers) {
-        if (!server.actions.empty()) {
-            const bool cancelled = invocation.cancel_requested();
-            invocation.fail(cancelled ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,
-                cancelled ? "cancelled" : "required_control_admission_unavailable",
-                "Required native control-action admission is not implemented by this adapter.");
-            return;
-        }
+    if (!request->control.connection) {
+        invocation.fail(addon::Result_status::UNAVAILABLE, "task_server_connection_unavailable");
+        return;
     }
     if (!bootstrap_available(request->context.launch_environment, invocation)) {
         return;
@@ -180,13 +170,21 @@ void prepare_delegated(addon::Invocation_context& invocation)
             invocation.cancel_requested() ? "cancelled" : "delegated_launcher_unavailable");
         return;
     }
+    const auto receipts = task_server_receipts(*request);
     addon::Delegated_prepare_result result;
     result.process = *process;
+    result.process.stdin_payload = initial_acp_input(*request, receipts);
+    // Qwen otherwise discovers MCP servers after it answers session/new, and
+    // its ACP prompt does not wait for them. With blocking discovery, the
+    // session reply follows every Task server's connection or failure.
+    set_environment(result.process.environment, "QWEN_CODE_LEGACY_MCP_BLOCKING", "1");
     result.profile_storage = request->context.profile_storage;
     result.account_context = request->context.account_context;
-    result.inspection = {true, initial_acp_state(request->prompt), true};
-    for (const auto& server : request->control.servers) {
-        result.acknowledgment.server_ids.push_back(server.server_id);
+    result.inspection = {true, initial_acp_state(request->prompt, receipts), true};
+    result.acknowledgment.connection_version = addon::k_delegated_connection_version;
+    for (const auto& receipt : receipts) {
+        result.acknowledgment.server_ids.push_back(receipt.server_id);
+        result.private_artifacts.push_back({receipt.parent_artifact, receipt.nonce});
     }
     invocation.succeed(addon::encode_delegated_prepare_result(result, 3));
 }

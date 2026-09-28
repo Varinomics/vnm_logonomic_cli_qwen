@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -44,20 +45,30 @@ void require(bool condition, const char* description)
     if (!condition) throw std::runtime_error(description);
 }
 
-void required_control_is_explicitly_unavailable()
+void required_control_reaches_native_admission(const char* executable)
 {
-    // Regression: invoke the real preparation owner with a decoder-valid envelope.
-    // A missing native executable is deliberate: the action-admission boundary
-    // must answer first, without running a native probe or creating a proposal.
-    const auto workspace = addon::path_to_utf8(std::filesystem::current_path());
-    const auto home = addon::path_to_utf8(std::filesystem::current_path() / ".qwen-profile");
-    const auto program = addon::path_to_utf8(std::filesystem::current_path() / "absent-required-control-native");
+    // Regression: preparation refused every request that named required
+    // actions, and the host always names them. The real preparation owner now
+    // proposes native ACP with every Task server behind the host relay.
+    namespace fs = std::filesystem;
+    const auto scratch = fs::temp_directory_path() / ("qwen-delegated-" + addon::random_nonce_hex());
+    fs::create_directories(scratch / "selected");
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{scratch};
+    const auto root = fs::canonical(scratch);
+    const auto home = addon::path_to_utf8(root / "selected");
+#ifdef _WIN32
+    const auto fake = root / "qwen.exe";
+#else
+    const auto fake = root / "qwen";
+#endif
+    fs::copy_file(fs::absolute(executable), fake);
     addon::Delegated_prepare_request request;
-    request.context.launcher = {"qwen", addon::k_runner_direct, program};
-    request.context.launcher_argv = {program};
-    request.context.working_directory = workspace;
-    request.context.account_context = addon::Account_context{2,
-        qwen::account_key(addon::path_from_utf8(home)), home};
+    request.purpose = addon::Structured_purpose::IMPLEMENTATION;
+    request.context.launcher.runner_key  = addon::k_runner_direct;
+    request.context.launcher.script_body = '"' + addon::path_to_utf8(fake) + '"';
+    request.context.launcher_argv        = {addon::path_to_utf8(fake)};
+    request.context.working_directory    = addon::path_to_utf8(root);
+    request.context.account_context = addon::Account_context{2, qwen::account_key(root / "selected"), home};
     addon::Launch_environment environment;
 #ifdef _WIN32
     environment.platform_id = "windows-x86_64";
@@ -65,42 +76,67 @@ void required_control_is_explicitly_unavailable()
     environment.platform_id = "linux-x86_64";
 #endif
     environment.effective_environment.set("QWEN_HOME", addon::Json_value(home));
+    for (const auto* name : {"SystemRoot", "PATH"}) {
+        if (const auto* value = std::getenv(name)) {
+            environment.effective_environment.set(name, addon::Json_value(value));
+        }
+    }
     environment.bootstrap = addon::Environment_bootstrap_evidence{home};
     request.context.launch_environment = environment;
-    request.prompt = "A task that must not be released without its required control action.";
-    request.control.task_id = "required-control-regression";
-    request.control.private_artifact_root = workspace;
-    request.control.servers.push_back({"control", program, {"task_status"},
-        {{"LOGONOMIC_TASK_ID", request.control.task_id}}});
-    addon::Contract_failure failure;
-    const auto payload = addon::encode_delegated_prepare_request(request, 3);
-    require(addon::decode_delegated_prepare_request(payload, &failure, 3).has_value(),
-        "containment fixture must satisfy the actual public decoder");
+    request.prompt = "Submit the review task to the delegation target.";
+    request.control.task_id = "task-7f3a";
+    request.control.private_artifact_root = root.generic_string();
+    request.control.connection = addon::Delegated_connection{
+        addon::path_to_utf8(root / "host relay"),
+        addon::path_to_utf8(root / ".logonomic/task-servers.json")};
+    const auto server_program = addon::path_to_utf8(root / "logonomic_coordination_mcp");
+    request.control.servers.push_back({"coordination", server_program, {"status", "notice"},
+        {{"VNM_CONTROL_TOKEN", "qwen-host-authority-canary"}}});
+    request.control.servers.push_back({"delegation", server_program, {"targets", "submit"}, {}});
     Context context;
-    context.m_request = {"required-control", {"delegated-session", 3}, "prepare", payload};
+    context.m_request = {"delegated", {"delegated-session", 3}, "prepare", addon::encode_delegated_prepare_request(request, 3)};
+    qwen::handle_preparation(context);
+    addon::Contract_failure failure;
+    const auto result = context.m_result ? addon::decode_delegated_prepare_result(*context.m_result, &failure, 3) : std::nullopt;
+    require(result && result->acknowledgment.connection_version == addon::k_delegated_connection_version &&
+        result->acknowledgment.server_ids == std::vector<std::string>{"coordination", "delegation"},
+        "required actions reach a relay-acknowledged native proposal");
+    require(!result->process.argv.empty() && result->process.argv.back() == "--acp" &&
+        qwen::environment_value(result->process.environment, "QWEN_CODE_LEGACY_MCP_BLOCKING") == "1",
+        "native ACP discovers the Task servers before it answers session/new");
+    const auto& input = result->process.stdin_payload;
+    require(input.find("qwen-host-authority-canary") == std::string::npos && input.find(request.prompt) == std::string::npos,
+        "neither host credentials nor the task enter ACP stdin before admission");
+    const auto session = addon::parse_json(input.substr(input.find('\n') + 1), {}, nullptr);
+    require(session.has_value(), "native session request remains JSON");
+    const auto& servers = session->find("params")->find("mcpServers")->as_array();
+    require(servers.size() == 2 && result->private_artifacts.size() == 2, "every Task server is configured once");
+    for (std::size_t index = 0; index < servers.size(); ++index) {
+        const auto& server = servers[index];
+        const auto& args = server.find("args")->as_array();
+        const auto& artifact = result->private_artifacts[index];
+        require(server.find("name")->as_string() == "logonomic-task-task-7f3a-" + request.control.servers[index].server_id &&
+            server.find("command")->as_string() == request.control.connection->relay_program &&
+            server.find("env")->as_array().empty() && args.size() == 8 &&
+            args[0].as_string() == "--descriptor" && args[1].as_string() == request.control.connection->descriptor_path &&
+            args[2].as_string() == "--server" && args[3].as_string() == request.control.servers[index].server_id &&
+            args[4].as_string() == "--attestation-path" && args[6].as_string() == "--attestation-nonce",
+            "ACP uses exact nonsecret relay arguments with a catalog receipt");
+        const auto& receipt = args[5].as_string();
+        const auto& nonce = args[7].as_string();
+        require(receipt == request.control.private_artifact_root + "/mcp/server-" + nonce + ".ready" &&
+            artifact.relative_path == "mcp/server-" + nonce + ".connection" && artifact.content == nonce,
+            "each receipt sits in a materialized private folder in the host's '/' form");
+    }
+
+    request.control.connection.reset();
+    Context unconnected;
+    unconnected.m_request = {"delegated", {"delegated-session", 3}, "prepare", addon::encode_delegated_prepare_request(request, 3)};
     bool refused = false;
-    try { qwen::handle_preparation(context); }
-    catch (const std::runtime_error& error) {
-        refused = std::string(error.what()) == "required_control_admission_unavailable";
-    }
-    require(refused && context.m_failure_status == addon::Result_status::UNAVAILABLE && !context.m_result,
-        "unsupported required actions must produce no process proposal or task bytes");
-    Context cancelled;
-    cancelled.m_request = context.m_request;
-    cancelled.m_cancelled = true;
-    bool cancellation_preserved = false;
-    try { qwen::handle_preparation(cancelled); }
-    catch (const std::runtime_error& error) {
-        cancellation_preserved = std::string(error.what()) == "cancelled";
-    }
-    require(cancellation_preserved && cancelled.m_failure_status == addon::Result_status::CANCELLED && !cancelled.m_result,
-        "the fail-closed boundary must not relabel an already cancelled request");
-    // The SDK accepts empty action lists, but the host requires nonempty ones.
-    // Decoder acceptance here cannot establish a working host delegation path.
-    request.control.servers.front().actions.clear();
-    require(addon::decode_delegated_prepare_request(
-        addon::encode_delegated_prepare_request(request, 3), &failure, 3).has_value(),
-        "empty-action control servers remain decoder-valid, not host-valid");
+    try { qwen::handle_preparation(unconnected); }
+    catch (const std::runtime_error& error) { refused = std::string(error.what()) == "task_server_connection_unavailable"; }
+    require(refused && unconnected.m_failure_status == addon::Result_status::UNAVAILABLE && !unconnected.m_result,
+        "Task servers are never launched without the host relay");
 }
 
 void launch_disposition()
@@ -255,9 +291,9 @@ void account_names()
 int main(int argc, char** argv)
 {
     if (argc == 2 && std::string(argv[1]) == "--help") {
-        std::cout << "  --resume <session>\n";
+        std::cout << "  --resume <session>\n  --acp\n";
         return 0;
     }
-    try { required_control_is_explicitly_unavailable(); launch_disposition(); resume_policy(argv[0]); account_names(); return 0; }
+    try { required_control_reaches_native_admission(argv[0]); launch_disposition(); resume_policy(argv[0]); account_names(); return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

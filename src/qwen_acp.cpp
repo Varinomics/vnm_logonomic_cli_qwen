@@ -1,8 +1,13 @@
 #include "qwen_acp.h"
 #include "qwen_json.h"
 
+#include <logonomic_cli_addon/ids.h>
+#include <logonomic_cli_addon/package_source.h>
+
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -12,7 +17,9 @@ namespace qwen {
 namespace {
 
 namespace addon = logonomic::cli_addon;
-constexpr std::size_t k_record_limit = 256 * 1024;
+// Qwen Code 0.24.3 announces its command catalog in one record of about
+// 560 KiB in a fresh profile. One record stays within the SDK stream bound.
+constexpr std::size_t k_record_limit = 1024 * 1024;
 constexpr std::size_t k_result_limit = 1024 * 1024;
 
 std::string rpc(int id, const char* method, Json params)
@@ -322,48 +329,117 @@ bool valid_drain_notification(const Json& value, std::string session)
     return true;
 }
 
-std::string initial_acp_input(
-    const addon::Session_launch_context& context, const std::vector<addon::Delegated_task_server>& control_servers,
-    std::string_view task_id)
+// Qwen asks its ACP client between tool batches for user messages queued
+// during the turn. This client queues none; Qwen documents "method not found"
+// as the answer of a client without that queue and then stops asking.
+bool mid_turn_queue_request(const Json& value, std::string_view session)
 {
-    auto servers = Json::array();
-    for (const auto& server : control_servers) {
-        auto environment = Json::array();
-        for (const auto& [name, value] : server.environment) {
-            environment.push_back(object({{"name", Json(name)}, {"value", Json(value)}}));
-        }
-        servers.push_back(object({{"name", Json("logonomic-task-" + std::string(task_id) + "-" + server.server_id)},
-            {"command", Json(server.program)}, {"args", Json::array()}, {"env", std::move(environment)}}));
-    }
+    const auto& id     = member(value, "id");
+    const auto& params = member(value, "params");
+    return exact_keys(value, {"jsonrpc", "id", "method", "params"}) && text(value, "jsonrpc") == "2.0" &&
+        text(value, "method") == "craft/drainMidTurnQueue" && (id.is_integer() || bounded_string(id, 512)) &&
+        only_keys(params, {"sessionId", "promptId", "todoStopGuardWatchQueuedPrompt"}) &&
+        !session.empty() && text(params, "sessionId") == session;
+}
+
+std::string method_not_found(const Json& id)
+{
+    return addon::serialize_json(object({{"jsonrpc", Json("2.0")}, {"id", id},
+        {"error", object({{"code", Json(-32601)}, {"message", Json("Method not found")}})}})) + '\n';
+}
+
+std::string initial_acp_input(const addon::Session_launch_context& context, Json servers)
+{
     return rpc(1, "initialize", object({{"protocolVersion", Json(1)}, {"clientCapabilities", Json::object()}})) +
         rpc(2, "session/new", object({{"cwd", Json(context.working_directory)}, {"mcpServers", std::move(servers)}}));
 }
 
+bool valid_receipts(const Json& receipts)
+{
+    if (!receipts.is_array()) return false;
+    return std::all_of(receipts.as_array().begin(), receipts.as_array().end(), [](const Json& receipt) {
+        const auto nonce = text(receipt, "nonce");
+        return exact_keys(receipt, {"path", "nonce"}) && bounded_string(member(receipt, "path"), 32 * 1024) &&
+            nonce.size() == 32 && std::all_of(nonce.begin(), nonce.end(), [](char c) {
+                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            });
+    });
+}
+
+// The relay creates each receipt empty when its connection starts and writes
+// the nonce only after the Task server's catalog succeeded.
+bool receipts_hold_nonces(const Json& receipts)
+{
+    namespace fs = std::filesystem;
+    return std::all_of(receipts.as_array().begin(), receipts.as_array().end(), [](const Json& receipt) {
+        const auto path = addon::path_from_utf8(text(receipt, "path"));
+        std::error_code error;
+        if (!fs::is_regular_file(fs::symlink_status(path, error)) || error) return false;
+        std::ifstream file(path, std::ios::binary);
+        char bytes[33]{};
+        file.read(bytes, sizeof(bytes));
+        return file.gcount() == 32 && std::string_view(bytes, 32) == text(receipt, "nonce");
+    });
+}
+
 } // namespace
+
+std::vector<Task_server_receipt> task_server_receipts(const addon::Delegated_prepare_request& request)
+{
+    std::vector<Task_server_receipt> receipts;
+    for (const auto& server : request.control.servers) {
+        const auto nonce = addon::random_nonce_hex();
+        const auto stem = "mcp/server-" + nonce;
+        // The host accepts the receipt path only in its clean '/'-separated
+        // form; a native join would insert '\' on Windows.
+        const auto path = (addon::path_from_utf8(request.control.private_artifact_root) / (stem + ".ready")).generic_u8string();
+        receipts.push_back({server.server_id, std::string(path.begin(), path.end()), nonce, stem + ".connection"});
+    }
+    return receipts;
+}
 
 std::string initial_acp_input(const addon::Structured_prepare_request& request)
 {
-    return initial_acp_input(request.context, {}, {});
+    return initial_acp_input(request.context, Json::array());
 }
 
-std::string initial_acp_input(const addon::Delegated_prepare_request& request)
+std::string initial_acp_input(const addon::Delegated_prepare_request& request, const std::vector<Task_server_receipt>& receipts)
 {
-    return initial_acp_input(request.context, request.control.servers, request.control.task_id);
+    const auto& connection = request.control.connection.value();
+    auto servers = Json::array();
+    for (const auto& receipt : receipts) {
+        auto arguments = Json::array();
+        for (const auto& argument : {std::string("--descriptor"), connection.descriptor_path,
+                 std::string("--server"), receipt.server_id, std::string("--attestation-path"), receipt.path,
+                 std::string("--attestation-nonce"), receipt.nonce})
+        {
+            arguments.push_back(Json(argument));
+        }
+        servers.push_back(object({{"name", Json("logonomic-task-" + request.control.task_id + "-" + receipt.server_id)},
+            {"command", Json(connection.relay_program)}, {"args", std::move(arguments)}, {"env", Json::array()}}));
+    }
+    return initial_acp_input(request.context, std::move(servers));
 }
 
-std::string initial_acp_state(std::string_view prompt)
+std::string initial_acp_state(std::string_view prompt, const std::vector<Task_server_receipt>& receipts)
 {
+    auto expected = Json::array();
+    for (const auto& receipt : receipts) {
+        expected.push_back(object({{"path", Json(receipt.path)}, {"nonce", Json(receipt.nonce)}}));
+    }
     return addon::serialize_json(object({{"stage", Json("await_initialize")}, {"pending_base64", Json("")},
         {"deferred_input_base64", Json("")},
         {"prompt_base64", Json(addon::encode_base64(prompt))}, {"session_id", Json("")},
-        {"result_base64", Json("")}}));
+        {"result_base64", Json("")}, {"receipts", std::move(expected)}}));
 }
 
 addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection& inspection)
 {
     const auto parsed = parse(inspection.protocol_state);
-    if (!parsed || !exact_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id", "result_base64"}) ||
-        !member(*parsed, "stage").is_string() || !bounded_string(member(*parsed, "session_id"), 512, true)) {
+    if (!parsed || !exact_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id",
+            "result_base64", "receipts"}) ||
+        !member(*parsed, "stage").is_string() || !bounded_string(member(*parsed, "session_id"), 512, true) ||
+        !valid_receipts(member(*parsed, "receipts"))) {
         return failure("malformed_acp_state");
     }
     auto state = *parsed;
@@ -392,6 +468,9 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
     // A reply proposed while a native record is incomplete has not been
     // written yet. Retain that causal boundary across inspection calls.
     std::string input = std::move(*deferred_input);
+    // Answers to fully received native requests; unlike our own requests they
+    // are written even while a later record is still partial.
+    std::string replies;
     bool completed = initial_stage == "await_drain";
     for (;;) {
         const auto end = pending->find('\n');
@@ -409,7 +488,13 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
             continue;
         }
         if (value->find("method")) {
-            if (value->find("id")) return failure("unsupported_acp_reverse_request");
+            if (value->find("id")) {
+                if (stage != "await_prompt" || !mid_turn_queue_request(*value, session)) {
+                    return failure("unsupported_acp_reverse_request");
+                }
+                replies += method_not_found(member(*value, "id"));
+                continue;
+            }
             if (!input.empty()) {
                 const auto update_type = text(member(member(*value, "params"), "update"), "sessionUpdate");
                 const bool housekeeping = update_type == "available_commands_update" ||
@@ -437,6 +522,9 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         else if (stage == "await_new") {
             if (!response(*value, 2) || !valid_session(result) ||
                 (!session.empty() && session != text(result, "sessionId"))) return failure("invalid_acp_session");
+            // Preparation makes Qwen discover MCP servers before this reply, so
+            // a Task server without its catalog receipt did not connect.
+            if (!receipts_hold_nonces(member(state, "receipts"))) return failure("task_servers_not_ready");
             state.set("session_id", member(result, "sessionId"));
             state.set("stage", Json("await_mode"));
             input = rpc(3, "session/set_mode", object({{"sessionId", member(state, "session_id")}, {"modeId", Json("yolo")}}));
@@ -453,7 +541,10 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
                 {"prompt", std::move(content)}}));
         }
         else if (stage == "await_prompt") {
-            if (!response(*value, 4) || !exact_keys(result, {"stopReason"})) return failure("invalid_acp_completion");
+            // Qwen Code 0.24 adds `_meta`, its checkpoint branch point, to the reply.
+            if (!response(*value, 4) || !only_keys(result, {"stopReason", "_meta"}) || !optional_object(result, "_meta")) {
+                return failure("invalid_acp_completion");
+            }
             if (text(result, "stopReason") == "cancelled") return failure("acp_cancelled");
             if (text(result, "stopReason") != "end_turn" || output->empty()) return failure("invalid_acp_completion");
             completed = true;
@@ -487,7 +578,8 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
     result.protocol_state = addon::serialize_json(state);
     result.close_stdin = completed && initial_stage != "await_drain";
     if (!addon::exchange_protocol_state_valid(result.protocol_state)) return failure("acp_state_limit");
-    if (!defer_input && !input.empty()) result.stdin_bytes = std::move(input);
+    if (!defer_input) replies += input;
+    if (!replies.empty()) result.stdin_bytes = std::move(replies);
     return result;
 }
 

@@ -59,7 +59,7 @@ int main() {
     require(inspect(prompt.protocol_state,wrong_session).failure_reason.has_value(),"foreign session cannot supply result");
     const std::string reverse=R"({"jsonrpc":"2.0","id":20,"method":"session/request_permission","params":{"sessionId":"s"}})" "\n";
     require(inspect(prompt.protocol_state,reverse).failure_reason.has_value(),"unsupported reverse request is not a notification");
-    require(inspect(prompt.protocol_state,std::string(256*1024+1,'x')).failure_reason.has_value(),"unterminated record is bounded");
+    require(inspect(prompt.protocol_state,std::string(1024*1024+1,'x')).failure_reason.has_value(),"unterminated record is bounded");
     require(inspect(prompt.protocol_state,"",true,0,true).failure_reason.has_value(),"timeout cannot complete a task");
     for (std::size_t split=1;split<model_text.size();++split) {
         const auto first=inspect(prompt.protocol_state,model_text.substr(0,split));

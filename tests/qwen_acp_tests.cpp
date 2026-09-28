@@ -1,7 +1,12 @@
 #include "qwen_acp.h"
 #include "qwen_json.h"
 
+#include <logonomic_cli_addon/ids.h>
+#include <logonomic_cli_addon/package_source.h>
+
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -73,6 +78,9 @@ void control_servers_are_session_scoped()
     addon::Delegated_prepare_request request;
     request.context.working_directory = "C:/work/repository";
     request.control.task_id = "task-7";
+    request.control.private_artifact_root = "C:/work/repository/.task-7";
+    request.control.connection = addon::Delegated_connection{
+        "C:/host/logonomic_task_server_relay.exe", "C:/work/repository/.task-7/.logonomic/task-servers.json"};
     addon::Delegated_task_server server;
     server.server_id   = "control-a";
     server.program     = "C:/host/task-control.exe";
@@ -80,7 +88,12 @@ void control_servers_are_session_scoped()
     server.environment = {{"LOGONOMIC_TASK_CAPABILITY", "secret"}};
     request.control.servers.push_back(server);
 
-    const auto input = qwen::initial_acp_input(request);
+    const auto receipts = qwen::task_server_receipts(request);
+    require(receipts.size() == 1 && receipts.front().server_id == "control-a" && receipts.front().nonce.size() == 32 &&
+        receipts.front().path == "C:/work/repository/.task-7/mcp/server-" + receipts.front().nonce + ".ready" &&
+        receipts.front().parent_artifact == "mcp/server-" + receipts.front().nonce + ".connection",
+        "each Task server gets a receipt in its own materialized folder, in the host's '/' form");
+    const auto input = qwen::initial_acp_input(request, receipts);
     const auto first_end = input.find('\n');
     require(first_end != std::string::npos, "initialize is one NDJSON record");
     const auto initialize = parse(std::string_view(input).substr(0, first_end));
@@ -93,14 +106,19 @@ void control_servers_are_session_scoped()
     require(servers.is_array() && servers.as_array().size() == 1, "every admitted control server is injected once");
     const auto& mapped = servers.as_array().front();
     require(qwen::text(mapped, "name") == "logonomic-task-task-7-control-a" &&
-        qwen::text(mapped, "command") == "C:/host/task-control.exe", "task and server identity bind the native command");
-    require(qwen::member(mapped, "args").is_array() && qwen::member(mapped, "args").as_array().empty(),
-        "SDK task servers expose an executable without invented arguments");
+        qwen::text(mapped, "command") == "C:/host/logonomic_task_server_relay.exe",
+        "task and server identity bind the host relay");
+    const auto& args = qwen::member(mapped, "args");
+    require(args.is_array() && args.as_array().size() == 8 &&
+        args.as_array()[0].as_string() == "--descriptor" &&
+        args.as_array()[1].as_string() == "C:/work/repository/.task-7/.logonomic/task-servers.json" &&
+        args.as_array()[2].as_string() == "--server" && args.as_array()[3].as_string() == "control-a" &&
+        args.as_array()[4].as_string() == "--attestation-path" && args.as_array()[5].as_string() == receipts.front().path &&
+        args.as_array()[6].as_string() == "--attestation-nonce" && args.as_array()[7].as_string() == receipts.front().nonce,
+        "the relay connects the named server and attests its catalog");
     const auto& environment = qwen::member(mapped, "env");
-    require(environment.is_array() && environment.as_array().size() == 1 &&
-        qwen::text(environment.as_array().front(), "name") == "LOGONOMIC_TASK_CAPABILITY" &&
-        qwen::text(environment.as_array().front(), "value") == "secret",
-        "host-issued control capability reaches only its MCP child");
+    require(environment.is_array() && environment.as_array().empty() && input.find("secret") == std::string::npos,
+        "host control capabilities never reach ACP");
     require(input.find("modelId") == std::string::npos && input.find("authenticate") == std::string::npos,
         "preparation preserves the profile-selected auth route and model");
 
@@ -112,6 +130,50 @@ void control_servers_are_session_scoped()
     require(qwen::member(qwen::member(structured_new, "params"), "mcpServers").is_array() &&
         qwen::member(qwen::member(structured_new, "params"), "mcpServers").as_array().empty(),
         "standalone structured implementation starts without delegated control servers");
+}
+
+void task_server_receipts_admit_the_session()
+{
+    // Preparation makes Qwen discover MCP servers before it answers
+    // session/new, so the reply is where every catalog receipt must hold its
+    // nonce. The relay reserves the file empty and writes the nonce only after
+    // the server's catalog succeeded.
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() / ("qwen-receipts-" + addon::random_nonce_hex());
+    fs::create_directories(root / "mcp");
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{root};
+    addon::Delegated_prepare_request request;
+    request.control.private_artifact_root = root.generic_string();
+    request.control.servers.push_back({"coordination", "C:/host/coordination.exe", {"status"}, {}});
+    request.control.servers.push_back({"delegation", "C:/host/delegation.exe", {"submit"}, {}});
+    const auto receipts = qwen::task_server_receipts(request);
+    const auto write = [](const std::string& path, const std::string& bytes) {
+        std::ofstream file(addon::path_from_utf8(path), std::ios::binary | std::ios::trunc);
+        file << bytes;
+        require(bool(file), "receipt fixture is written");
+    };
+    const auto session_reply = [&]() {
+        auto response = inspect(qwen::initial_acp_state("Implement it.", receipts), initialize_response());
+        return inspect(response.protocol_state, new_session_response());
+    };
+    auto response = session_reply();
+    require(response.complete && response.failure_reason == "task_servers_not_ready" && !response.stdin_bytes,
+        "a Task server that never connected keeps the prompt from Qwen");
+    write(receipts[0].path, receipts[0].nonce);
+    write(receipts[1].path, "");
+    response = session_reply();
+    require(response.failure_reason == "task_servers_not_ready",
+        "a reserved receipt without its nonce is a connection whose catalog did not succeed");
+    write(receipts[1].path, receipts[0].nonce);
+    response = session_reply();
+    require(response.failure_reason == "task_servers_not_ready", "a receipt holds its own server's nonce");
+    write(receipts[1].path, receipts[1].nonce + "\n");
+    response = session_reply();
+    require(response.failure_reason == "task_servers_not_ready", "a receipt holds exactly the nonce");
+    write(receipts[1].path, receipts[1].nonce);
+    response = session_reply();
+    require(!response.complete && response.stdin_bytes && response.stdin_bytes->find("session/set_mode") != std::string::npos,
+        "attested Task servers let the session proceed to the prompt");
 }
 
 void authenticated_transcript_completes()
@@ -158,6 +220,16 @@ void completion_is_independent_of_stdout_chunks()
     auto response = inspect(state, completion + advisory, true);
     require(response.complete && response.result_bytes == "Done." && !response.close_stdin,
         "prompt and advisory first seen at final EOF complete without another close request");
+    // Qwen Code 0.24.3 reply, observed through the scripted delegation gate.
+    response = inspect(state,
+        R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-alpha","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done."}}}})" "\n"
+        R"({"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn","_meta":{"qwen.branchPoint":{"assistantRecordUuid":"2291684c-370f-4e82-887d-35736fde30b6","checkpointUuid":"8f40be75-ec51-407d-932c-173a155bc9c7"}}}})" "\n", true);
+    require(response.complete && response.result_bytes == "Done." && !response.failure_reason,
+        "a prompt reply carrying Qwen's checkpoint metadata completes");
+    response = inspect(state,
+        R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-alpha","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done."}}}})" "\n"
+        R"({"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn","_meta":"branch"}})" "\n", true);
+    require(response.failure_reason == "invalid_acp_completion", "reply metadata must be an object");
 
     const auto draining = inspect(state, completion).protocol_state;
     response = inspect(draining, advisory.substr(0, advisory.size() - 1), true);
@@ -220,12 +292,37 @@ void failures_are_terminal_and_bounded()
     require(response.complete && response.failure_reason == "unsupported_acp_reverse_request",
         "noninteractive delegated execution refuses reverse authority requests");
 
+    const std::string drain_request =
+        R"({"jsonrpc":"2.0","id":0,"method":"craft/drainMidTurnQueue","params":{"sessionId":"session-alpha","todoStopGuardWatchQueuedPrompt":true}})" "\n";
+    response = inspect(state, drain_request);
+    require(!response.complete && !response.failure_reason && response.stdin_bytes ==
+        std::string(R"({"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"Method not found"}})") + "\n",
+        "Qwen's mid-turn queue request is answered as a client without that queue");
+    response = inspect(state, drain_request + R"({"jsonrpc":"2.0","method":"session/update")");
+    require(!response.complete && !response.failure_reason && response.stdin_bytes &&
+        response.stdin_bytes->find("-32601") != std::string::npos,
+        "a fully received native request is answered while a later record is partial");
+    auto foreign_drain = drain_request;
+    foreign_drain.replace(foreign_drain.find("session-alpha"), std::string("session-alpha").size(), "session-other");
+    response = inspect(state, foreign_drain);
+    require(response.complete && response.failure_reason == "unsupported_acp_reverse_request",
+        "a mid-turn queue request for another session is refused");
     response = inspect(state,
         R"({"jsonrpc":"2.0","id":4,"result":{"stopReason":"cancelled"}})" "\n");
     require(response.complete && response.failure_reason == "acp_cancelled" && !response.result_bytes,
         "Qwen's source-defined cancelled stop reason cannot become success");
 
-    response = inspect(state, std::string(256 * 1024 + 1, 'x'));
+    std::string catalog = R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-alpha","update":{"sessionUpdate":"available_commands_update","availableCommands":[)";
+    for (int index = 0; catalog.size() < 600 * 1024; ++index) {
+        catalog += std::string(index ? "," : "") + R"({"name":"skill-)" + std::to_string(index) +
+            R"(","description":")" + std::string(1000, 'd') + R"(","input":null})";
+    }
+    catalog += "]}}}\n";
+    response = inspect(state, catalog);
+    require(!response.complete && !response.failure_reason,
+        "a command catalog the size Qwen announces in a fresh profile is one acceptable record");
+
+    response = inspect(state, std::string(1024 * 1024 + 1, 'x'));
     require(response.complete && response.failure_reason == "acp_record_limit",
         "unterminated native output remains bounded");
 
@@ -254,6 +351,7 @@ void response_order_is_authenticated()
 int main()
 {
     control_servers_are_session_scoped();
+    task_server_receipts_admit_the_session();
     authenticated_transcript_completes();
     completion_is_independent_of_stdout_chunks();
     authentication_catalog_is_advisory();

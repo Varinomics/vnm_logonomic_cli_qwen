@@ -8,27 +8,34 @@ The integration uses Qwen's native command hooks, exact UUID session resume,
 and Agent Client Protocol. Structured and delegated implementation sessions
 use native ACP with the existing configured authentication and model. They do
 not offer read-only review: the implementation protocol selects Qwen's `yolo`
-mode. Delegated preparation refuses nonempty required control-action lists with
-`required_control_admission_unavailable` before native probes or process
-proposals. Because the host requires nonempty actions, this disables all valid
-host delegation. Interactive launch and resume remain independent. ACP mode
-acknowledgment does not establish native action admission.
-These operations require `structured-session@3` and, for delegation,
+mode, which runs tools without confirmation; a permission request fails the
+task. These operations require `structured-session@3` and, for delegation,
 `delegated-session@3`. An authenticated prompt response requests native stdin
 EOF; validated advisory output is drained through clean process exit before the
 result is released. Timeout, failed exit and incomplete final records fail the
 operation.
 
+Delegated preparation configures each Task server in ACP `session/new` as the
+host relay with `--descriptor`, `--server`, a catalog receipt path and its
+nonce, and no environment, and acknowledges connection version 1; a request
+without a connection is refused as `task_server_connection_unavailable`. The
+relay writes the nonce to the receipt only after the Task server's catalog,
+which it limits to the required actions, succeeded. Qwen otherwise discovers MCP
+servers in the background after it answers `session/new`, and its ACP prompt
+does not wait for them, so delegated runs set Qwen's
+`QWEN_CODE_LEGACY_MCP_BLOCKING=1`: discovery of every configured server then
+completes or times out before the reply. At that reply every receipt must hold
+its nonce, or the task fails as `task_servers_not_ready` before the prompt is
+sent. Qwen's ACP reports no per-session MCP tool list, so the receipt is the
+evidence that the required actions reached Qwen.
+
 Proper host delegated-task support is ABSOLUTELY MANDATORY, not optional. The
-current refusal is an incomplete mandatory implementation, not an accepted final
-limitation. The package MUST implement and validate end-to-end host delegated
-tasks, including required control tools and action admission, actual CLI
-integration, authentication, host process custody, and cleanup. Capability
-declarations, mode acknowledgments, and blanket refusal do not constitute
-completion. Preserve the current safe refusal until its replacement passes
-end-to-end validation. Any established upstream limitation MUST be reported with
-concrete evidence; it does not silently waive the product requirement. This
-support is not implemented and validated today.
+package MUST implement and validate end-to-end host delegated tasks, including
+required control tools and action admission, actual CLI integration,
+authentication, host process custody, and cleanup. Capability declarations,
+mode acknowledgments, and blanket refusal do not constitute completion. Any
+established upstream limitation MUST be reported with concrete evidence; it
+does not silently waive the product requirement.
 
 Interactive hooks deliver host-admitted title and coordination instructions as
 Qwen `hookSpecificOutput.additionalContext`. Prompt submission and Stop provide inferred phase
