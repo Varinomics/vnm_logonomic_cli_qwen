@@ -391,6 +391,7 @@ void append_transcript(
         current.metadata.completed_date, retained.metadata.completed_date);
     for (const auto& [uuid, event] : retained.events) {
         (void)event;
+        check_cancel(context);
         if (!current.events.contains(uuid)) {
             budget.incomplete = true;
         }
@@ -400,6 +401,7 @@ void append_transcript(
     // Absence is not a correction. A complete observed UUID can correct its
     // counters, but truncation or pruning cannot remove another accepted UUID.
     for (auto& [uuid, event] : current.events) {
+        check_cancel(context);
         retained.events.insert_or_assign(uuid, std::move(event));
     }
 }
@@ -474,12 +476,14 @@ void collect(
     }
     for (const auto& [id, record] : evidence.summaries) {
         (void)record;
+        check_cancel(context);
         if (!sessions.contains(id.substr(5))) {
             budget.incomplete = true;
         }
     }
     for (auto& [id, session] : sessions) {
         (void)id;
+        check_cancel(context);
         const auto key = session.record.record_id;
         if (summaries_complete) {
             evidence.summaries.insert_or_assign(key, std::move(session.record));
@@ -515,6 +519,7 @@ void collect(
     }
     for (const auto& [id, transcript] : evidence.transcripts) {
         (void)transcript;
+        check_cancel(context);
         if (!seen.contains(id)) {
             budget.incomplete = true;
         }
@@ -529,7 +534,9 @@ std::vector<addon::Usage_record> records_for(
     std::map<std::string, std::map<std::string, const Event*>> occurrences;
     std::uint64_t event_count = 0;
     for (const auto& [id, transcript] : evidence.transcripts) {
+        check_cancel(context);
         for (const auto& [uuid, event] : transcript.events) {
+            check_cancel(context);
             if (++event_count > budget.limits.source_entries) {
                 throw Usage_error("usage_history_capacity");
             }
@@ -539,6 +546,7 @@ std::vector<addon::Usage_record> records_for(
     std::map<std::string, std::map<std::string, Model>> models;
     std::map<std::string, addon::Usage_record> metadata;
     for (const auto& [id, transcript] : evidence.transcripts) {
+        check_cancel(context);
         metadata.emplace(id, transcript.metadata);
     }
     for (const auto& [uuid, copies] : occurrences) {
@@ -548,12 +556,14 @@ std::vector<addon::Usage_record> records_for(
         const auto& observation = *copies.begin()->second;
         std::map<std::string, std::string> origins;
         for (const auto& [id, event] : copies) {
+            check_cancel(context);
             if (!same_event(observation, *event)) {
                 throw Usage_error("usage_event_conflict");
             }
             std::set<std::string> visited;
             auto origin = id;
             while (!origins.contains(origin)) {
+                check_cancel(context);
                 const auto found = copies.find(origin);
                 if (found == copies.end() || found->second->copied_from.empty()) {
                     break;
@@ -567,6 +577,7 @@ std::vector<addon::Usage_record> records_for(
                 origin = known->second;
             }
             for (const auto& intermediate : visited) {
+                check_cancel(context);
                 origins.emplace(intermediate, origin);
             }
             origins.emplace(id, origin);
@@ -593,6 +604,7 @@ std::vector<addon::Usage_record> records_for(
     }
     std::map<std::string, addon::Usage_record> records;
     for (const auto& [id, details] : metadata) {
+        check_cancel(context);
         const auto transcript = evidence.transcripts.find(id);
         if (!models.contains(id) && (transcript == evidence.transcripts.end() ||
             (transcript->second.events.empty() && !transcript->second.forked &&
@@ -604,6 +616,7 @@ std::vector<addon::Usage_record> records_for(
         evidence.transcripts[id].published = true;
     }
     for (const auto& [id, summary] : evidence.summaries) {
+        check_cancel(context);
         const auto transcript = evidence.transcripts.find(id);
         if (transcript == evidence.transcripts.end() || !transcript->second.forked) {
             records.insert_or_assign(id, summary);
@@ -612,6 +625,7 @@ std::vector<addon::Usage_record> records_for(
         std::map<std::string, Model> gross_models;
         for (const auto& [uuid, event] : transcript->second.events) {
             (void)uuid;
+            check_cancel(context);
             accumulate(gross_models[event.model], event);
         }
         const auto gross = aggregate(transcript->second.metadata, gross_models);
@@ -1101,7 +1115,10 @@ void handle_usage(addon::Invocation_context& context)
             identifier = addon::random_nonce_hex();
             if (version == 3) {
                 // Surviving summaries and events cannot certify complete session history.
-                for (auto& record : candidate->records) record.aggregate_evidence = "partial";
+                for (auto& record : candidate->records) {
+                    check_cancel(context);
+                    record.aggregate_evidence = "partial";
+                }
                 candidate->cache_candidate = addon::seal_usage_cache_candidate(
                     request->cache_selection->candidate_root, request->context.profile_storage->root,
                     request->context.account_context, identifier, "qwen-evidence-cache@1",
@@ -1131,6 +1148,7 @@ void handle_usage(addon::Invocation_context& context)
         std::size_t end = begin;
         std::size_t bytes = 0;
         while (end < snapshot->records.size() && page.records.size() < addon::k_max_usage_page_records) {
+            check_cancel(context);
             const auto size = addon::serialize_json(addon::encode_usage_record(snapshot->records[end], version)).size();
             if (size > k_max_page_bytes - bytes) break;
             bytes += size;
