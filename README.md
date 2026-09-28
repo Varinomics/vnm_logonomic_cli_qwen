@@ -19,6 +19,17 @@ EOF; validated advisory output is drained through clean process exit before the
 result is released. Timeout, failed exit and incomplete final records fail the
 operation.
 
+Proper host delegated-task support is ABSOLUTELY MANDATORY, not optional. The
+current refusal is an incomplete mandatory implementation, not an accepted final
+limitation. The package MUST implement and validate end-to-end host delegated
+tasks, including required control tools and action admission, actual CLI
+integration, authentication, host process custody, and cleanup. Capability
+declarations, mode acknowledgments, and blanket refusal do not constitute
+completion. Preserve the current safe refusal until its replacement passes
+end-to-end validation. Any established upstream limitation MUST be reported with
+concrete evidence; it does not silently waive the product requirement. This
+support is not implemented and validated today.
+
 Interactive hooks deliver host-admitted title and coordination instructions as
 Qwen `hookSpecificOutput.additionalContext`. Prompt submission and Stop provide inferred phase
 evidence; Stop does not prove success because another native hook can resume
