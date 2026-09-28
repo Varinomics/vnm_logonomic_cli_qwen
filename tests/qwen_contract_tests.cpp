@@ -2,9 +2,13 @@
 #include "qwen_launcher.h"
 #include "qwen_lifecycle.h"
 
+#include <logonomic_cli_addon/capability_ids.h>
 #include <logonomic_cli_addon/host_simulator.h>
 #include <logonomic_cli_addon/ids.h>
+#include <logonomic_cli_addon/lifecycle_events.h>
+#include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/sidecar.h>
 
 #include <filesystem>
 #include <iostream>
@@ -149,6 +153,59 @@ bool lifecycle_contract()
     return ok;
 }
 
+bool declared_profile_admits_every_shape(const std::filesystem::path& package)
+{
+    // Oracle: the host's feature gate. It rejects an observation carrying a
+    // fact the package's own declaration leaves unsupported, phase and all.
+    const addon::Directory_package_source source(package);
+    const auto bytes = source.read(
+        addon::sidecar_relative_path(addon::k_lifecycle_events_capability_id, addon::k_lifecycle_events_version),
+        addon::limits::k_max_sidecar_bytes,
+        nullptr);
+    const auto sidecar = bytes ? addon::parse_sidecar(*bytes, nullptr) : std::nullopt;
+    const auto declaration = sidecar ? addon::decode_lifecycle_declaration(sidecar->payload, nullptr) : std::nullopt;
+    if (!check(declaration.has_value(), "package lifecycle declaration is readable")) return false;
+    addon::Attention_classification_request request;
+    request.base.ledger.current_epoch = 1;
+    request.base.ledger.current_transition = addon::Ledger_transition{
+        addon::Transition_kind::START, "native-session", std::string(32, 'b')};
+    bool ok = true;
+    const auto classify = [
+            &request,
+            &declaration,
+            &ok
+        ](
+            const char* name,
+            const char* member,
+            const char* value,
+            const char* shape)
+        {
+            request.base.event.name = name;
+            request.base.event.body = qwen::object({
+                {"session_id", qwen::Json("native-session")}, {"event_id", qwen::Json("helper-delivery")},
+                {"prompt_id", qwen::Json("native-turn")}, {member, qwen::Json(value)}});
+            const auto result = qwen::classify_attention(request);
+            ok &= check(!result.base.observations.empty(), shape);
+            for (const auto& observation : result.base.observations) {
+                ok &= check(addon::lifecycle_profile_admits(declaration->features, observation), shape);
+            }
+        };
+    request.base.ledger.current_transition->provider_session_id = "previous-session";
+    for (const auto* start_source : {"startup", "resume", "branch", "clear"}) {
+        classify("SessionStart", "source", start_source, "the declaration refuses a session start or resume");
+    }
+    request.base.ledger.current_transition->provider_session_id = "native-session";
+    classify("UserPromptSubmit", "prompt", "Continue", "the declaration refuses a turn start");
+    classify("Stop", "stop_hook_active", "false", "the declaration refuses a turn completion");
+    classify("StopFailure", "error", "rate_limit", "the declaration refuses a failed turn");
+    for (const auto* notification : {"permission_prompt", "elicitation_dialog"}) {
+        classify("Notification", "notification_type", notification,
+            "the declaration refuses an approval request or a structured question");
+    }
+    classify("SessionEnd", "reason", "clear", "the declaration refuses a session end");
+    return ok;
+}
+
 bool attention_contract(const std::filesystem::path& package, const std::filesystem::path& root)
 {
     addon::Simulator_options options;
@@ -254,7 +311,9 @@ int main(int argc, char** argv)
     int result = 1;
     try {
         std::filesystem::create_directories(root);
-        result = settings_contract() && lifecycle_contract() && attention_contract(addon::path_from_utf8(argv[1]), root)
+        const auto package = addon::path_from_utf8(argv[1]);
+        result = settings_contract() && lifecycle_contract() && declared_profile_admits_every_shape(package) &&
+                attention_contract(package, root)
             ? 0 : 1;
     }
     catch (const std::exception& error) {

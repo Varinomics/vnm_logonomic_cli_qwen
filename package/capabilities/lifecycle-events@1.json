@@ -11,7 +11,7 @@
       "blockable_completion": "unsupported",
       "root_turn_completion": "supported",
       "root_turn_start": "supported",
-      "confirmed_phase_status": "unsupported",
+      "confirmed_phase_status": "supported",
       "subagents": "unsupported"
     },
     "turn_origin_correlation": "unsupported"
