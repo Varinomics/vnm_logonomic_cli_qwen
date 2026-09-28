@@ -104,6 +104,21 @@ void required_control_reaches_native_admission(const char* executable)
     require(!result->process.argv.empty() && result->process.argv.back() == "--acp" &&
         qwen::environment_value(result->process.environment, "QWEN_CODE_LEGACY_MCP_BLOCKING") == "1",
         "native ACP discovers the Task servers before it answers session/new");
+    for (const auto& options : std::vector<std::vector<std::string>>{{"--yolo"}, {"-y"}, {"--approval-mode", "default"},
+            {"--approval-mode", "plan"}, {"--approval-mode", "auto-edit"}}) {
+        auto selected = request;
+        for (const auto& option : options) selected.context.launcher.script_body += " " + option;
+        selected.context.launcher_argv.insert(selected.context.launcher_argv.end(), options.begin(), options.end());
+        Context configured;
+        configured.m_request = {"delegated", {"delegated-session", 3}, "prepare",
+            addon::encode_delegated_prepare_request(selected, 3)};
+        qwen::handle_preparation(configured);
+        const auto proposal = configured.m_result
+            ? addon::decode_delegated_prepare_result(*configured.m_result, &failure, 3) : std::nullopt;
+        auto expected = selected.context.launcher_argv;
+        expected.push_back("--acp");
+        require(proposal && proposal->process.argv == expected, "launcher permission options are preserved in delegated ACP");
+    }
     const auto& input = result->process.stdin_payload;
     require(input.find("qwen-host-authority-canary") == std::string::npos && input.find(request.prompt) == std::string::npos,
         "neither host credentials nor the task enter ACP stdin before admission");

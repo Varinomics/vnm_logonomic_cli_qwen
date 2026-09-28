@@ -16,6 +16,7 @@ struct Task_server_receipt
     std::string path;
     std::string nonce;
     std::string parent_artifact;
+    std::vector<std::string> tool_names;
 };
 
 std::vector<Task_server_receipt> task_server_receipts(const logonomic::cli_addon::Delegated_prepare_request& request);

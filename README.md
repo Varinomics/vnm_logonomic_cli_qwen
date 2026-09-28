@@ -7,9 +7,12 @@ this package does not install a CLI, log in, copy credentials, or call a paid AP
 The integration uses Qwen's native command hooks, exact UUID session resume,
 and Agent Client Protocol. Structured and delegated implementation sessions
 use native ACP with the existing configured authentication and model. They do
-not offer read-only review: the implementation protocol selects Qwen's `yolo`
-mode, which runs tools without confirmation; a permission request fails the
-task. These operations require `structured-session@3` and, for delegation,
+not offer read-only review. The launcher options and user's Qwen configuration
+determine permission mode. The package approves only this Task's own tools,
+once per request, and rejects every other permission request once. It never
+selects persistent approval or an approval that switches modes. A launcher
+that needs file edits or commands must grant them itself. These operations
+require `structured-session@3` and, for delegation,
 `delegated-session@3`. An authenticated prompt response requests native stdin
 EOF; validated advisory output is drained through clean process exit before the
 result is released. Timeout, failed exit and incomplete final records fail the

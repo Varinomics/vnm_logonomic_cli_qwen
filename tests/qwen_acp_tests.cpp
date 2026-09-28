@@ -61,15 +61,8 @@ std::string prompt_state()
     require(!response.complete && !response.stdin_bytes, "initialize waits for the already-issued session request");
     response = inspect(response.protocol_state, new_session_response());
     require(!response.complete && response.stdin_bytes &&
-        response.stdin_bytes->find("session/set_mode") != std::string::npos &&
-        response.stdin_bytes->find("yolo") != std::string::npos,
-        "authenticated session selects Qwen's noninteractive implementation mode");
-    response = inspect(response.protocol_state,
-        R"({"jsonrpc":"2.0","method":"qwen/notify/session/mode-update","params":{"v":1,"sessionId":"session-alpha","currentModeId":"yolo"}})" "\n"
-        R"({"jsonrpc":"2.0","id":3,"result":{}})" "\n");
-    require(!response.complete && response.stdin_bytes &&
         response.stdin_bytes->find("session/prompt") != std::string::npos,
-        "successful mode selection releases the prompt");
+        "authenticated session releases the prompt under launcher permissions");
     return response.protocol_state;
 }
 
@@ -172,7 +165,7 @@ void task_server_receipts_admit_the_session()
     require(response.failure_reason == "task_servers_not_ready", "a receipt holds exactly the nonce");
     write(receipts[1].path, receipts[1].nonce);
     response = session_reply();
-    require(!response.complete && response.stdin_bytes && response.stdin_bytes->find("session/set_mode") != std::string::npos,
+    require(!response.complete && response.stdin_bytes && response.stdin_bytes->find("session/prompt") != std::string::npos,
         "attested Task servers let the session proceed to the prompt");
 }
 
@@ -289,8 +282,8 @@ void failures_are_terminal_and_bounded()
 
     response = inspect(state,
         R"({"jsonrpc":"2.0","id":91,"method":"session/request_permission","params":{"sessionId":"session-alpha"}})" "\n");
-    require(response.complete && response.failure_reason == "unsupported_acp_reverse_request",
-        "noninteractive delegated execution refuses reverse authority requests");
+    require(response.complete && response.failure_reason == "task_permission_response_unavailable",
+        "malformed permission requests fail without approval");
 
     const std::string drain_request =
         R"({"jsonrpc":"2.0","id":0,"method":"craft/drainMidTurnQueue","params":{"sessionId":"session-alpha","todoStopGuardWatchQueuedPrompt":true}})" "\n";
@@ -342,7 +335,7 @@ void response_order_is_authenticated()
         "a session response cannot stand in for initialize");
 
     response = inspect(qwen::initial_acp_state("Implement it."), initialize_response() + new_session_response());
-    require(!response.complete && response.stdin_bytes && response.stdin_bytes->find("session/set_mode") != std::string::npos,
+    require(!response.complete && response.stdin_bytes && response.stdin_bytes->find("session/prompt") != std::string::npos,
         "ordered coalesced responses advance exactly one outgoing action");
 }
 
