@@ -272,6 +272,78 @@ void launch_disposition(const char* executable)
 #endif
 }
 
+#ifdef _WIN32
+void direct_launch_starts_selected_program(const char* executable)
+{
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() / ("qwen-direct-" + addon::random_nonce_hex());
+    fs::create_directories(root / "bin");
+    fs::create_directories(root / "native");
+    fs::create_directories(root / "selected");
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{root};
+    const auto fake = root / "native" / "qwen.exe";
+    const auto home = addon::path_to_utf8(root / "selected");
+    fs::copy_file(fs::absolute(executable), fake);
+    {
+        std::ofstream command(root / "bin" / "qwen.cmd", std::ios::binary);
+        command << "@echo off\r\n\"" << addon::path_to_utf8(fake) << "\" %*\r\n";
+        std::ofstream script(root / "bin" / "qwen.ps1", std::ios::binary);
+        script << "& " << powershell_quote(addon::path_to_utf8(fake)) << " @args\nexit $LASTEXITCODE\n";
+    }
+    addon::Launch_environment environment;
+    environment.platform_id = "windows-x86_64";
+    environment.effective_environment.set("QWEN_HOME", addon::Json_value(home));
+    environment.effective_environment.set("PATH", addon::Json_value(
+        addon::path_to_utf8(root / "bin") + ";" + (std::getenv("PATH") ? std::getenv("PATH") : "")));
+    for (const auto* name : {"SystemRoot", "SystemDrive", "PATHEXT", "ComSpec"}) {
+        if (const auto* value = std::getenv(name)) {
+            environment.effective_environment.set(name, addon::Json_value(value));
+        }
+    }
+    environment.bootstrap = addon::Environment_bootstrap_evidence{home};
+    const std::vector<std::string> options{"--model", "selected-model", "--approval-mode", "plan"};
+    for (const auto& program : std::vector<std::string>{"qwen", addon::path_to_utf8(root / "bin" / "qwen.cmd"),
+            addon::path_to_utf8(root / "bin" / "qwen.ps1"), addon::path_to_utf8(fake)})
+    {
+        addon::Prepare_request request;
+        request.launcher = {'"' + program + "\" --model selected-model --approval-mode plan", addon::k_runner_direct, ""};
+        request.launcher_argv = {program};
+        request.launcher_argv.insert(request.launcher_argv.end(), options.begin(), options.end());
+        request.working_directory = addon::path_to_utf8(root);
+        request.account_context = addon::Account_context{2, qwen::account_key(root / "selected"), home};
+        request.launch_environment = environment;
+        Context context;
+        context.m_request = {"direct", {"launch-preparation", 3}, "prepare", addon::encode_prepare_request(request, 3)};
+        qwen::handle_preparation(context);
+        addon::Contract_failure failure;
+        const auto patch = context.m_result ? addon::decode_launch_patch(*context.m_result, &failure, 3) : std::nullopt;
+        require(patch && patch->argv && patch->disposition && patch->disposition->prepared,
+            "the selected direct launcher must propose a Windows native invocation");
+        require(addon::validate_launch_patch(*patch, {}, {}, &failure), "the native invocation satisfies host policy");
+        require(patch->account_context && patch->account_context->adapter_account_key == request.account_context->adapter_account_key &&
+            patch->account_context->profile_path == request.account_context->profile_path,
+            "the direct launch retains its selected account and profile");
+        std::error_code ignored;
+        fs::remove(root / "selected" / "capture.json", ignored);
+        const auto output = qwen::probe(*patch->argv, qwen::environment_pairs(environment.effective_environment),
+            request.working_directory, 10000, context);
+        require(output.has_value(), "the actual fresh-launch invocation completes through CreateProcessW");
+        std::ifstream input(root / "selected" / "capture.json", std::ios::binary);
+        const std::string content{std::istreambuf_iterator<char>(input), {}};
+        const auto capture = addon::parse_json(content, {}, nullptr);
+        require(capture && addon::path_from_utf8(qwen::text(*capture, "executable")) == fs::absolute(fake) &&
+            qwen::text(*capture, "profile") == home, "the selected child receives the original native profile");
+        std::vector<std::string> actual;
+        for (const auto& argument : capture->find("argv")->as_array()) {
+            actual.push_back(argument.as_string());
+        }
+        require(actual == options, "fresh script-shim launch preserves model and permission arguments exactly");
+        std::cout << "fresh direct child=" << qwen::text(*capture, "executable")
+            << " argv=" << addon::serialize_json(*capture->find("argv")) << '\n';
+    }
+}
+#endif
+
 void resume_policy(const char* executable)
 {
     namespace fs = std::filesystem;
@@ -586,6 +658,15 @@ int main(int argc, char** argv)
         std::cout << "  --resume <session>\n  --acp\n";
         return 0;
     }
-    try { required_control_reaches_native_admission(argv[0]); launch_disposition(argv[0]); resume_policy(argv[0]); account_names(); return 0; }
+    try {
+        required_control_reaches_native_admission(argv[0]);
+        launch_disposition(argv[0]);
+#ifdef _WIN32
+        direct_launch_starts_selected_program(argv[0]);
+#endif
+        resume_policy(argv[0]);
+        account_names();
+        return 0;
+    }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

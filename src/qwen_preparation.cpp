@@ -57,8 +57,16 @@ void prepare_launch(addon::Invocation_context& invocation)
     const bool direct = request->launcher.runner_key == "direct";
     bool admitted = false;
     if (direct) {
-        admitted = selected_command(request->launcher, request->launcher_argv,
-            environment, request->working_directory).has_value();
+        const auto selected = selected_command(request->launcher, request->launcher_argv,
+            environment, request->working_directory);
+        admitted = selected.has_value();
+        if (selected) {
+            patch.argv = platform_command(*selected, environment, request->working_directory);
+            if (!patch.argv) {
+                invocation.fail(addon::Result_status::UNAVAILABLE, "launch_program_unavailable");
+                return;
+            }
+        }
     }
 #ifdef _WIN32
     else
