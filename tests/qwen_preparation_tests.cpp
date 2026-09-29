@@ -48,6 +48,39 @@ void require(bool condition, const char* description)
     if (!condition) throw std::runtime_error(description);
 }
 
+void help_capabilities(const char* executable)
+{
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() / ("qwen-help-" + addon::random_nonce_hex());
+    fs::create_directories(root);
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{root};
+#ifdef _WIN32
+    const auto fake = root / "qwen.exe";
+#else
+    const auto fake = root / "qwen";
+#endif
+    fs::copy_file(fs::absolute(executable), fake);
+    // Installed help mentions --continue/--resume before declaring --resume.
+    // Admit the declaration while retaining option word boundaries.
+    for (const auto& [help, supported] : std::vector<std::pair<const char*, bool>>{
+            {"  --chat-recording  If false, --continue/--resume will not work.\n"
+             "  -r, --resume  Resume a specific session by its ID.\n", true},
+            {"  --chat-recording  If false, --continue/--resume will not work.\n", false},
+            {"  --resumeless  A different option.\n", false},
+            {"  prefix--resume  An embedded mention.\n", false},
+        })
+    {
+        qwen::Environment environment{{"QWEN_TEST_HELP", help}};
+        for (const auto* name : {"PATH", "SystemRoot", "SystemDrive", "PATHEXT", "ComSpec"}) {
+            if (const auto* value = std::getenv(name)) environment.emplace_back(name, value);
+        }
+        Context context;
+        require(qwen::selected_program_supports(addon::path_to_utf8(fake), environment,
+            addon::path_to_utf8(root), "--resume", context) == supported,
+            "help option declarations remain usable after inline mentions, without admitting unsupported tokens");
+    }
+}
+
 #ifdef _WIN32
 std::string powershell_quote(std::string value)
 {
@@ -639,7 +672,8 @@ int main(int argc, char** argv)
 {
     if (qwen::base_name(argv[0]) == "qwen") {
         if (argc == 2 && std::string(argv[1]) == "--help") {
-            std::cout << "  --resume <session>\n  --acp\n";
+            const char* help = std::getenv("QWEN_TEST_HELP");
+            std::cout << (help ? help : "  --resume <session>\n  --acp\n");
             return 0;
         }
         const char* home = std::getenv("QWEN_HOME");
@@ -659,6 +693,7 @@ int main(int argc, char** argv)
         return 0;
     }
     try {
+        help_capabilities(argv[0]);
         required_control_reaches_native_admission(argv[0]);
         launch_disposition(argv[0]);
 #ifdef _WIN32

@@ -369,15 +369,18 @@ bool selected_program_supports(
     // Capability evidence comes from the selected executable, never a ceiling
     // on a moving vendor release number.
     const std::string help = output->output + '\n' + output->errors;
-    const auto option = help.find(required_option);
-    if (option == std::string::npos ||
-        (option > 0 && help[option - 1] != ' ' && help[option - 1] != '\t') ||
-        (option + required_option.size() < help.size() &&
-            std::isalnum(static_cast<unsigned char>(help[option + required_option.size()]))))
+    for (auto option = help.find(required_option); option != std::string::npos;
+         option = help.find(required_option, option + 1))
     {
-        return false;
+        if ((option > 0 && help[option - 1] != ' ' && help[option - 1] != '\t') ||
+            (option + required_option.size() < help.size() &&
+                std::isalnum(static_cast<unsigned char>(help[option + required_option.size()]))))
+        {
+            continue;
+        }
+        return true;
     }
-    return true;
+    return false;
 }
 
 std::optional<std::vector<std::string>> verified_command(
