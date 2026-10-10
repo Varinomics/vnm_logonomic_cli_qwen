@@ -81,6 +81,89 @@ std::string event(
 
 const std::string counts = "\"input_token_count\":7,\"output_token_count\":5,\"cached_content_token_count\":0,\"thoughts_token_count\":2,\"total_token_count\":0";
 
+std::string dated_event(std::string_view id, std::string_view values, std::string uuid,
+    std::string_view instant, std::string_view copied_from = {})
+{
+    auto row = event(id, values, std::move(uuid), copied_from);
+    row.replace(row.find("2026-09-12T12:00:00.000Z"), 24, instant);
+    return row;
+}
+
+void native_temporal_uses_admitted_model_basis()
+{
+    // Oracle: the adopted extraction contract retains the native model-wide H
+    // basis and proves only timestamps of admitted original UUID increments.
+    Workspace workspace;
+    Context context;
+    const auto source = workspace.path / "projects/repo/chats/timed.jsonl";
+    const auto first = "2026-09-11T23:59:59.125Z";
+    const auto last  = "2026-09-12T00:00:00.250Z";
+    const auto native = "\"input_token_count\":3,\"output_token_count\":2,\"thoughts_token_count\":1,\"total_token_count\":9";
+    write(source, dated_event("timed", counts, "first", first) +
+        dated_event("timed", native, "last", last));
+    auto records = qwen::scan_usage(workspace.path, context);
+    require(records[0].total_tokens == 9 && records[0].temporal &&
+        records[0].temporal->portions.size() == 1 &&
+        records[0].temporal->portions[0].instant == last &&
+        records[0].temporal->portions[0].total_tokens == 9,
+        "zero native event total does not invent per-event fallback in a positive-total model");
+    const auto missing_total = "\"input_token_count\":3,\"output_token_count\":2,\"thoughts_token_count\":1";
+    write(source, dated_event("timed", counts, "first", first) +
+        dated_event("timed", missing_total, "last", last));
+    records = qwen::scan_usage(workspace.path, context);
+    require(records[0].total_tokens == 20 && records[0].temporal &&
+        records[0].temporal->portions.size() == 2 &&
+        records[0].temporal->portions[0].instant == first &&
+        records[0].temporal->portions[0].total_tokens == 14 &&
+        records[0].temporal->portions[1].total_tokens == 6,
+        "missing model total uses the same admitted input output thoughts fallback for every event");
+    write(workspace.path / "usage_record.jsonl", summary("timed", 30));
+    records = qwen::scan_usage(workspace.path, context);
+    require(records[0].total_tokens == 30 && records[0].temporal &&
+        records[0].temporal->unavailable_tokens == 10 &&
+        records[0].temporal->coverage_reason == "missing-evidence",
+        "summary H retains exact partial transcript proof independently of completion date");
+    write(workspace.path / "usage_record.jsonl", summary("timed", 10));
+    records = qwen::scan_usage(workspace.path, context);
+    require(records[0].total_tokens == 10 && records[0].temporal &&
+        records[0].temporal->portions.empty() && records[0].temporal->unavailable_tokens == 10,
+        "transcript total above summary H withdraws only optional temporal proof");
+    fs::remove(source);
+    records = qwen::scan_usage(workspace.path, context);
+    require(records[0].total_tokens == 10 && records[0].temporal &&
+        records[0].temporal->portions.empty() && records[0].temporal->unavailable_tokens == 10,
+        "summary-only completion date is not an event instant");
+
+    fs::remove(workspace.path / "usage_record.jsonl");
+    write(source, dated_event("timed", native, "same", last) +
+        dated_event("timed", native, "same", "2026-09-12T00:00:01.250Z"));
+    records = qwen::scan_usage(workspace.path, context);
+    require(records[0].total_tokens == 9 && records[0].temporal &&
+        records[0].temporal->portions.empty() && records[0].temporal->unavailable_tokens == 9,
+        "same-accounting duplicate timestamp disagreement withdraws temporal proof only");
+    write(source, dated_event("timed", native, "same", last));
+    const auto base_size = addon::serialize_json(addon::encode_usage_record(
+        qwen::scan_usage(workspace.path, context)[0], 2)).size();
+    qwen::Usage_limits limits;
+    limits.result_bytes = base_size;
+    records = qwen::scan_usage(workspace.path, context, limits);
+    require(records.size() == 1 && records[0].total_tokens == 9 && !records[0].temporal,
+        "original result bytes take priority over optional envelope bytes");
+    write(source, dated_event("session\\twith-tab", native, "same", last));
+    records = qwen::scan_usage(workspace.path, context);
+    require(records[0].total_tokens == 9 && !records[0].temporal,
+        "accounting identity containing an admitted control character omits optional temporal proof");
+    for (const auto invalid : {"2026-09-12T00:00:00+00:00", "2026-09-12T00:00:00.250000000Z",
+        "2026-09-12T00:00:00", "2026-09-12T00:00:60.250Z"})
+    {
+        write(source, dated_event("timed", native, "same", invalid));
+        bool rejected = false;
+        try { (void)qwen::scan_usage(workspace.path, context); }
+        catch (const std::exception&) { rejected = true; }
+        require(rejected, "native transcript timestamp admission stays Date.toISOString millisecond UTC");
+    }
+}
+
 void native_recovery_and_summary_precedence()
 {
     Workspace workspace;
@@ -144,12 +227,12 @@ addon::Usage_scan_request request_for(const fs::path& home)
     return request;
 }
 
-Context invoke(const addon::Usage_scan_request& request)
+Context invoke(const addon::Usage_scan_request& request, std::uint16_t version = 2)
 {
     Context context;
-    context.invocation.capability = {"usage-scan", 2};
+    context.invocation.capability = {"usage-scan", version};
     context.invocation.operation = "scan";
-    context.invocation.payload = addon::encode_usage_scan_request(request, 2);
+    context.invocation.payload = addon::encode_usage_scan_request(request, version);
     qwen::handle_usage(context);
     return context;
 }
@@ -192,12 +275,12 @@ void attach_seed(addon::Usage_scan_request& request, std::string_view contents, 
         addon::to_hex(addon::Sha256::digest(contents)), request.context.account_context->adapter_account_key, required};
 }
 
-addon::Usage_scan_page successful_page(const addon::Usage_scan_request& request)
+addon::Usage_scan_page successful_page(const addon::Usage_scan_request& request, std::uint16_t version = 2)
 {
-    const auto result = invoke(request);
+    const auto result = invoke(request, version);
     require(result.result.has_value(), "usage scan unexpectedly failed");
     addon::Contract_failure failure;
-    const auto page = addon::decode_usage_scan_result(*result.result, &failure, 2);
+    const auto page = addon::decode_usage_scan_result(*result.result, &failure, version);
     require(page.has_value(), "usage page violates public codec");
     return *page;
 }
@@ -358,6 +441,77 @@ void copied_evidence_recovers_ancestry_without_parent_files()
     require(tokens_for(zeroed, "parent") == 100 && tokens_for(zeroed, "branch") == 0 &&
         tokens_for(zeroed, "nested") == 0,
         "superseded attribution publishes explicit zero under the earlier stable session key");
+}
+
+void temporal_bounds_preserve_original_rows_and_copy_owners()
+{
+    Workspace workspace;
+    Context context;
+    const auto chats = workspace.path / "projects/repo/chats";
+    const auto instant = "2026-09-12T12:00:00.125Z";
+    write(chats / "parent.jsonl", dated_event("parent", token_counts(10), "original", instant));
+    write(chats / "branch.jsonl", dated_event("branch", token_counts(10), "original", instant, "parent") +
+        dated_event("branch", token_counts(3), "branch-call", instant));
+    auto records = qwen::scan_usage(workspace.path, context);
+    require(records.size() == 2 && records[0].record_id == "qwen:branch" &&
+        records[0].total_tokens == 3 && records[0].temporal->portions[0].total_tokens == 3 &&
+        records[1].total_tokens == 10 && records[1].temporal->portions[0].total_tokens == 10,
+        "temporal increments follow original UUID copy ownership before reduction");
+    write(chats / "branch.jsonl", dated_event("branch", token_counts(10), "original",
+        "2026-09-12T12:00:00.250Z", "parent") + dated_event("branch", token_counts(3), "branch-call", instant));
+    records = qwen::scan_usage(workspace.path, context);
+    require(records[0].total_tokens == 3 && records[0].temporal->unavailable_tokens == 0 &&
+        records[1].total_tokens == 10 && records[1].temporal->unavailable_tokens == 10,
+        "copied timestamp disagreement withdraws only its original owner proof");
+    fs::remove(chats / "parent.jsonl");
+    fs::remove(chats / "branch.jsonl");
+    const auto dense = [&](std::string id, unsigned count) {
+        std::string history;
+        for (unsigned index = 0; index < count; ++index) {
+            const auto timestamp = "2026-09-12T12:00:0" + std::to_string(index / 1000) + '.' +
+                std::to_string(1000 + index % 1000).substr(1) + 'Z';
+            history += dated_event(id, token_counts(1), id + '-' + std::to_string(index), timestamp);
+        }
+        return history;
+    };
+    write(chats / "dense.jsonl", dense("dense", 4097));
+    records = qwen::scan_usage(workspace.path, context);
+    require(records[0].total_tokens == 4097 && records[0].temporal &&
+        records[0].temporal->portions.empty() && records[0].temporal->unavailable_tokens == 4097 &&
+        records[0].temporal->coverage_reason == "capacity",
+        "position capacity withdraws optional proof while conserving original H");
+    write(chats / "dense.jsonl", dense("dense", 4096));
+    records = qwen::scan_usage(workspace.path, context);
+    require(records[0].temporal && records[0].temporal->portions.size() == 4096 &&
+        records[0].temporal->unavailable_tokens == 0,
+        "the full admitted 4096-position boundary retains exact proof");
+    qwen::Usage_limits limits;
+    limits.result_bytes = addon::serialize_json(addon::encode_usage_record(records[0], 2)).size() + 4096;
+    records = qwen::scan_usage(workspace.path, context, limits);
+    require(records[0].total_tokens == 4096 && records[0].temporal &&
+        records[0].temporal->portions.empty() && records[0].temporal->coverage_reason == "capacity",
+        "reduced original result budget admits accounting and a validated capacity envelope");
+    fs::remove(chats / "dense.jsonl");
+    for (unsigned index = 0; index < 8; ++index) {
+        const auto id = "dense-" + std::to_string(index);
+        write(chats / (id + ".jsonl"), dense(id, 4096));
+    }
+    auto request = request_for(workspace.path);
+    const auto candidate = addon::path_from_utf8(request.context.profile_storage->root) / "candidate";
+    fs::create_directories(candidate);
+    request.cache_selection = addon::Usage_cache_selection{std::nullopt, qwen::path_string(candidate)};
+    const auto page = successful_page(request, 3);
+    require(page.complete && page.records.size() == 8 &&
+        addon::serialize_json(addon::encode_usage_scan_result(page, 3)).size() <= 2 * 1024 * 1024,
+        "actual metadata and cursor framing fit Qwen's complete page bound");
+    bool capacity = false;
+    for (const auto& record : page.records) {
+        require(record.total_tokens == 4096 && record.temporal &&
+            record.temporal->parent.snapshot_id == page.snapshot_id,
+            "page fallback preserves every original row and actual temporal parent");
+        capacity = capacity || record.temporal->coverage_reason == "capacity";
+    }
+    require(capacity, "page boundary reduces optional proof without skipping the accounting cursor");
 }
 
 void required_empty_seed_refreshes_durable_history()
@@ -527,6 +681,8 @@ void profile_consumes_host_resolution_without_environment_mutation()
 int main()
 {
     try {
+        native_temporal_uses_admitted_model_basis();
+        temporal_bounds_preserve_original_rows_and_copy_owners();
         native_recovery_and_summary_precedence();
         partial_categories_and_torn_recovery();
         pages_bind_exact_environment_and_survive_retry();

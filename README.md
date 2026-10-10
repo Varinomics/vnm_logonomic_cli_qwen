@@ -90,6 +90,24 @@ amounts are corrected together. A bounded atomic cache in host-acknowledged prof
 storage preserves the evidence and identities across restarts and source deletion.
 Native history remains unchanged.
 
+The optional `usage-temporal@1` capability accompanies `usage-scan@3`. It
+preserves admitted native UTC millisecond event timestamps, resolves original
+UUID ownership before assigning portions, and uses the same model-wide total
+or input/output/thoughts fallback as session accounting. A nonfork summary may
+retain partial proved increments up to its exact total; excess transcript
+evidence withdraws time proof without changing that total. Summary completion
+dates never supply event instants. Missing, conflicting or capacity-limited
+time evidence remains an exact unavailable amount.
+
+Time metadata is an independently versioned optional sibling of each unchanged
+accounting event in the single `qwen-evidence-cache@1` records file. Its canonical
+digest binds the original event before replay and metadata rebinding. Damaged,
+stale or unsupported optional data cannot invalidate accounting, and bounded
+future carriers remain opaque. Original accounting has priority within source,
+cache, snapshot, result and page budgets. Published proof binds the actual
+account, record, total, snapshot and selected accepted manifest. Ordinary
+`usage-scan@1` and `usage-scan@2` results retain their accounting format.
+
 Native summaries contain no UUIDs or fork markers. A fork whose transcript was
 deleted before the package observed any copy provenance cannot be distinguished
 from independent spend using those summaries alone. Such markerless summaries
