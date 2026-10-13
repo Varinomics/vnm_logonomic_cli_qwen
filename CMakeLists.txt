@@ -99,9 +99,9 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:qwen_helper>" "${QWEN_PACKAGE_DIRECTORY}/helpers/qwen_helper${CMAKE_EXECUTABLE_SUFFIX}"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:qwen_launch_bridge>" "${QWEN_PACKAGE_DIRECTORY}/helpers/qwen_launch_bridge${CMAKE_EXECUTABLE_SUFFIX}"
     COMMAND "$<TARGET_FILE:logonomic_cli_addon_index>" "${QWEN_PACKAGE_DIRECTORY}"
-        --third-party "assets/qwen.svg" "notices/qwen-LICENSE.txt"
+        --third-party "assets/qwen_dark.svg" "notices/qwen-LICENSE.txt"
             "provenance/qwen_logo.json"
-        --third-party "notices/qwen-NOTICE.txt" "notices/qwen-LICENSE.txt"
+        --third-party "assets/qwen_light.svg" "notices/qwen-LICENSE.txt"
             "provenance/qwen_logo.json"
     DEPENDS qwen_adapter qwen_helper qwen_launch_bridge logonomic_cli_addon_index
         "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt" ${package_files}

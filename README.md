@@ -169,10 +169,10 @@ not an upstream compatibility pin. Primary contracts are in
 `packages/core/src/config/storage.ts`, the native ACP implementation, and
 `packages/core/src/services/{chatRecordingService,usageHistoryService}.ts`.
 
-The bundled Qwen logo comes from
-`packages/desktop-shell/bootstrap/qwen-code-logo.svg` in that source. Its
-upstream Apache-2.0 license is retained in `package/notices/qwen-LICENSE.txt`;
-`package/provenance/qwen_logo.json` records its indexed source attribution.
-The upstream desktop shell's NOTICE is retained unchanged in
-`package/notices/qwen-NOTICE.txt`. Its Node.js distribution statement describes
-that upstream shell; the Logonomic add-on does not bundle the Node.js runtime.
+The bundled dark and light Qwen icons use the user-supplied downloads from
+[theSVG](https://thesvg.org/). The source catalog identifies Qwen's icons as
+MIT-licensed; its license is retained in `package/notices/qwen-LICENSE.txt`.
+`package/provenance/qwen_logo.json` records the source files, hashes and changes.
+The dark icon's white fill is expanded from `#ffff` to `#ffffff` for Qt SVG
+rendering. Browser layout styling and `1em` dimensions are normalized for the
+host's SVG subset. Both variants preserve the downloaded path and viewBox.

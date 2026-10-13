@@ -1,15 +1,36 @@
 {
-  "upstream": "https://github.com/QwenLM/qwen-code",
-  "snapshot": "6a211b465227dd35ad3c35a2dcb86a809590bcd0",
-  "source_path": "packages/desktop-shell/bootstrap/qwen-code-logo.svg",
+  "upstream": "https://github.com/glincker/thesvg",
+  "snapshot": "c011b346cab6edfd568155d94fb1fa267a80e323",
+  "download_source": "https://thesvg.org/",
+  "license": "MIT",
+  "license_catalog": "src/data/icons.json",
+  "license_source_path": "LICENSE",
   "notice": "notices/qwen-LICENSE.txt",
-  "resources": ["assets/qwen.svg", "notices/qwen-NOTICE.txt"],
-  "upstream_notice": {
-    "source_path": "packages/desktop-shell/NOTICE",
-    "resource": "notices/qwen-NOTICE.txt",
-    "source_sha256": "63ec46cba8da7cf6c99dc6faef3d96f23e79bb42423f67c5d3fde86dc004d67c",
-    "changes": "Copied without modification. Its distribution and Node.js statements describe the upstream desktop shell; this add-on does not bundle the Node.js runtime."
-  },
-  "changes": ["Renamed qwen-code-logo.svg to qwen.svg; SVG bytes are unchanged."],
-  "source_sha256": "f7e324607c3f657953977d2742fbb8a3a0a354a13736671d27bfb906e9d1f3f2"
+  "resources": [
+    "assets/qwen_dark.svg",
+    "assets/qwen_light.svg"
+  ],
+  "sources": [
+    {
+      "resource": "assets/qwen_dark.svg",
+      "download_name": "qwen-dark.svg",
+      "source_path": "public/icons/qwen/dark.svg",
+      "source_sha256": "1729febe65990585b1ba96c223143f108f709f722c1d354238fd470630b51f54",
+      "changes": [
+        "Replaced 1em dimensions with 24 and removed browser layout styling for the host SVG subset; path data and viewBox are unchanged.",
+        "Expanded the white fill from #ffff to #ffffff for Qt SVG rendering.",
+        "Added a final newline."
+      ]
+    },
+    {
+      "resource": "assets/qwen_light.svg",
+      "download_name": "qwen-light.svg",
+      "source_path": "public/icons/qwen/light.svg",
+      "source_sha256": "dcb3ba2f2b55ccbacbade0ca0bf98921fbaf8a07848972974b4a9bf8077376cf",
+      "changes": [
+        "Replaced 1em dimensions with 24 and removed browser layout styling for the host SVG subset; path data and viewBox are unchanged.",
+        "Added a final newline."
+      ]
+    }
+  ]
 }

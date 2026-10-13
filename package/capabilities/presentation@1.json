@@ -4,8 +4,8 @@
   "payload": {
     "display_name": "Qwen Code",
     "icon": {
-      "dark": "assets/qwen.svg",
-      "light": "assets/qwen.svg"
+      "dark": "assets/qwen_dark.svg",
+      "light": "assets/qwen_light.svg"
     }
   }
 }
