@@ -47,6 +47,27 @@ the turn. StopFailure confirms failure of an identified root turn. Permission
 notifications provide unpaired inferred attention. Child lifecycle tracking is
 not advertised: Qwen's child stop hook runs before its blockable completion gate.
 
+The optional `session-wake@1` capability uses Qwen's documented cross-session
+peer protocol on Linux. A managed launch binds its selected profile; each wake
+resolves the exact native session and verifies the registry's process start,
+PID namespace and authenticated socket peer. A private per-launch environment
+nonce proves that process belongs to the original managed launch, even if another
+process later resumes the same native conversation. Inaccessible process binding
+evidence makes wake unavailable. Windows reports native peer inbox
+support unavailable. Missing or incompatible live peer records leave messages
+queued in Logonomic until the session becomes active.
+
+Notifications enter Qwen's peer input queue independently of the terminal
+composer. They identify Logonomic and ask the agent to read its mailbox; message
+bodies remain in that mailbox. The add-on presents only the ordinary peer token,
+does not claim another agent's approval mode, and preserves the recipient's own
+`agents.crossSessionInbound` policy. Its default policy may hold notifications
+for review; an explicitly configured `accept` policy admits them. A native hold
+counts as retained acceptance, with a `held:` receipt, to prevent automatic
+resubmission while Qwen owns it. Retention does not prove a model turn or mailbox
+read. A lost receipt after writing is uncertain and must not be retried
+automatically. No controller grant or settings change is created by this capability.
+
 The optional `attention-kind@1` companion labels native `permission_prompt`
 notifications as `permission` and `elicitation_dialog` notifications as
 `interactive_question`. Both remain inferred and unpaired: native session and
@@ -154,10 +175,13 @@ manually remove only that identified disposable export before retrying; never
 remove an installed generation this way. The application's package ingestion
 owns atomic installation and updates.
 
-The package includes focused contract, usage and ACP fixtures, SDK package
-validation and package conformance registrations. They are authored but have
-not been built or run during this source preparation. Qualification and live
-activation belong to the later combined integration pass.
+The package includes focused contract, usage, ACP and native peer fixtures,
+SDK package validation and package conformance registrations. The native peer
+fixture uses isolated Linux sockets and profiles. For interoperability against
+an installed `@qwen-code/sdk/peer`, run `node tests/qwen_peer_sdk_tests.mjs
+<sdk-dist>/peer/index.js <build>/qwen_wake_tests`; it uses a disposable SDK
+endpoint without a model API or user session. This proves the native wire and
+receipt boundary, not idle-turn scheduling in the actual Qwen terminal UI.
 
 ## Source provenance
 
@@ -168,6 +192,12 @@ not an upstream compatibility pin. Primary contracts are in
 `packages/cli/src/config/{config,environment,settings,shared-env-keys}.ts`,
 `packages/core/src/config/storage.ts`, the native ACP implementation, and
 `packages/core/src/services/{chatRecordingService,usageHistoryService}.ts`.
+
+The peer integration follows the public
+[`cross-session-protocol.md`](https://github.com/QwenLM/qwen-code/blob/6212189f1f8334da78a69e3fb6b63ff6ca88251e/docs/users/features/cross-session-protocol.md)
+contract, with that revision recorded as research provenance rather than a
+CLI-version constraint. The selected live registry and protocol shape decide
+availability.
 
 The bundled dark and light Qwen icons use the user-supplied downloads from
 [theSVG](https://thesvg.org/). The source catalog identifies Qwen's icons as

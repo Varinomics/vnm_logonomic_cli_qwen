@@ -5,6 +5,7 @@
 #include "qwen_launcher.h"
 #include "qwen_lifecycle.h"
 #include "qwen_preparation.h"
+#include "qwen_session_wake.h"
 #include "qwen_usage.h"
 
 #include <logonomic_cli_addon/adapter_runtime.h>
@@ -91,6 +92,10 @@ void invoke(addon::Invocation_context& context)
             transform(context);
         }
         else
+        if (capability == "session-wake") {
+            qwen::handle_session_wake(context);
+        }
+        else
         if (capability == "accounts") {
             qwen::handle_accounts(context);
         }
@@ -168,6 +173,7 @@ int main()
         {"profile-storage", 1},
         {"launch-preparation", 3}, {"managed-configuration", 2}, {"helper-ingress", 2},
         {"lifecycle-events", 1}, {"coordination-delivery", 1},
+        {"session-wake", 1},
         {"model-context-delivery", 1},
         {addon::k_attention_kind_capability_id, addon::k_attention_kind_version},
         {"environment-bootstrap", 1},

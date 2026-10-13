@@ -3,7 +3,9 @@
 #include "qwen_config.h"
 #include "qwen_json.h"
 #include "qwen_launcher.h"
+#include "qwen_peer.h"
 #include "qwen_profile.h"
+#include "qwen_session_wake.h"
 
 #include <logonomic_cli_addon/launch_preparation.h>
 #include <logonomic_cli_addon/package_source.h>
@@ -91,6 +93,12 @@ void prepare_launch(addon::Invocation_context& invocation)
     context.account_context = request->account_context;
     context.launch_environment = request->launch_environment;
     (void)profile_for_context(context);
+    if (request->session_wake) {
+        patch.session_wake = prepare_session_wake(context);
+        if (patch.session_wake->available) {
+            patch.set.emplace_back(k_wake_binding_environment, text(patch.session_wake->binding, "launch_token"));
+        }
+    }
     // The host's bootstrap owns the effective home. This requests a pure
     // snapshot transform against that same declared target and a host CAS.
     patch.disposition = addon::Launch_disposition{true, true, true};
@@ -271,6 +279,12 @@ void prepare_resume(addon::Invocation_context& invocation)
     result.process.stdin_behavior = addon::Stdin_behavior::INHERIT;
     result.patch.profile_storage = request->context.profile_storage;
     result.patch.account_context = request->context.account_context;
+    if (request->context.session_wake) {
+        result.patch.session_wake = prepare_session_wake(request->context);
+        if (result.patch.session_wake->available) {
+            result.patch.set.emplace_back(k_wake_binding_environment, text(result.patch.session_wake->binding, "launch_token"));
+        }
+    }
     result.acknowledgment.record_digest_hex = addon::resume_record_digest_hex(request->resume_record);
     invocation.succeed(addon::encode_resume_prepare_result(result, 2));
 }

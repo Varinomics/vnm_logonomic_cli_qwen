@@ -4,6 +4,7 @@
 #include "qwen_config.h"
 #include "qwen_launcher.h"
 #include "qwen_json.h"
+#include "qwen_peer.h"
 
 #include <logonomic_cli_addon/accounts.h>
 #include <logonomic_cli_addon/host_simulator.h>
@@ -13,6 +14,7 @@
 #include <logonomic_cli_addon/session_contracts.h>
 
 #include <cstdlib>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -46,6 +48,22 @@ public:
 void require(bool condition, const char* description)
 {
     if (!condition) throw std::runtime_error(description);
+}
+
+void wake_patch(const addon::Launch_patch& patch)
+{
+    require(patch.session_wake.has_value(), "a negotiated managed launch reports wake readiness");
+#ifdef __linux__
+    const auto& wake = *patch.session_wake;
+    const auto token = qwen::text(wake.binding, "launch_token");
+    const auto entry = std::find(patch.set.begin(), patch.set.end(),
+        std::pair<std::string, std::string>{qwen::k_wake_binding_environment, token});
+    require(wake.available && token.size() == 32 && entry != patch.set.end(),
+        "the exact live binding token reaches the original managed child environment");
+#else
+    require(!patch.session_wake->available && patch.session_wake->reason == "qwen_peer_platform_unavailable",
+        "a Windows launch truthfully reports missing native peer inbox support");
+#endif
 }
 
 void help_capabilities(const char* executable)
@@ -260,6 +278,7 @@ void launch_disposition(const char* executable)
     environment.bootstrap = addon::Environment_bootstrap_evidence{home};
     request.launch_environment = environment;
     request.account_context = addon::Account_context{2, qwen::account_key(addon::path_from_utf8(home)), home};
+    request.session_wake = addon::Session_wake_offer{};
     for (const bool prepared : {true, false}) {
         if (!prepared) {
             request.launcher.script_body = "echo unrelated";
@@ -285,6 +304,9 @@ void launch_disposition(const char* executable)
         require(patch->account_context && patch->account_context->adapter_account_key == request.account_context->adapter_account_key &&
             patch->account_context->profile_path == request.account_context->profile_path, "preparation retains the admitted account");
         require(addon::validate_launch_patch(*patch, {}, {}, &failure), "returned patch must satisfy host policy");
+        if (prepared) {
+            wake_patch(*patch);
+        }
         if (!prepared) require(patch->set.empty() && patch->unset.empty() && !patch->argv,
             "unmanaged preparation must preserve the native launch");
     }
@@ -429,6 +451,16 @@ void resume_policy(const char* executable)
     require(result->process.argv.back() == "019933a1-6e43-7102-a520-b3c8294cc763" &&
         addon::validate_resume_acknowledgment(request.resume_record, result->acknowledgment, &failure),
         "resume must preserve the selected native session identity");
+    request.context.session_wake = addon::Session_wake_offer{};
+    Context wake_context;
+    wake_context.m_request = {"resume-wake", {"interactive-resume", 2}, "prepare_resume",
+        addon::encode_resume_prepare_request(request, 2)};
+    qwen::handle_preparation(wake_context);
+    const auto wake_result = wake_context.m_result
+        ? addon::decode_resume_prepare_result(*wake_context.m_result, &failure, 2) : std::nullopt;
+    require(wake_result.has_value(), "resume preserves its independently negotiated wake result");
+    wake_patch(wake_result->patch);
+    request.context.session_wake.reset();
 #ifdef _WIN32
     const auto direct_capture = run_resume_process(*result, request, fs::absolute(executable));
     const auto* direct_arguments = direct_capture.find("argv");

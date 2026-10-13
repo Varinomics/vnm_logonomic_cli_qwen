@@ -58,7 +58,8 @@ endfunction()
 add_library(qwen_provider STATIC
     src/qwen_accounts.cpp src/qwen_usage.cpp src/qwen_profile.cpp
     src/qwen_acp.cpp src/qwen_config.cpp src/qwen_launcher.cpp
-    src/qwen_lifecycle.cpp src/qwen_preparation.cpp)
+    src/qwen_lifecycle.cpp src/qwen_preparation.cpp
+    src/qwen_peer.cpp src/qwen_session_wake.cpp)
 qwen_target(qwen_provider)
 target_include_directories(qwen_provider PUBLIC src)
 target_link_libraries(qwen_provider PUBLIC logonomic_cli_addon_sdk::sdk)
@@ -116,6 +117,12 @@ if(LOGONOMIC_CLI_ADDON_EMBEDDED)
 endif()
 
 enable_testing()
+add_executable(qwen_wake_tests tests/qwen_wake_tests.cpp)
+target_link_libraries(qwen_wake_tests PRIVATE qwen_provider)
+qwen_target(qwen_wake_tests)
+add_test(NAME qwen_wake_tests COMMAND qwen_wake_tests)
+set_tests_properties(qwen_wake_tests PROPERTIES TIMEOUT 60
+    ENVIRONMENT "QWEN_LOGONOMIC_WAKE_BINDING=bfc0b538f38596aef4ac803b9f182cde")
 add_executable(qwen_preparation_tests tests/qwen_preparation_tests.cpp)
 target_link_libraries(qwen_preparation_tests PRIVATE qwen_provider)
 qwen_target(qwen_preparation_tests)
