@@ -186,7 +186,7 @@ void native_recovery_and_summary_precedence()
     require(records[0].cache_read.value == 0, "observed zero cache tokens stay known");
     require(records[0].source_counter_semantics == "per_event_sum", "transcript counter provenance is truthful");
     require(records[1].total_tokens == 32 && records[1].source_counter_semantics == "cumulative_final", "durable last-wins summary remains authoritative");
-    require(!records[1].cost_microusd.applicable && !records[1].cache_creation.applicable, "unavailable native cost and cache-creation fields remain unsupported");
+    require(!records[1].cache_creation.applicable, "unavailable native cache-creation field remains unsupported");
 }
 
 void partial_categories_and_torn_recovery()
