@@ -6,6 +6,7 @@
 #include "qwen_json.h"
 #include "qwen_peer.h"
 
+#include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/accounts.h>
 #include <logonomic_cli_addon/host_simulator.h>
 #include <logonomic_cli_addon/launch_preparation.h>
@@ -155,7 +156,7 @@ void required_control_reaches_native_admission(const char* executable)
 #ifdef _WIN32
     environment.platform_id = "windows-x86_64";
 #else
-    environment.platform_id = "linux-x86_64";
+    environment.platform_id = addon::host_platform_id();
 #endif
     environment.effective_environment.set("QWEN_HOME", addon::Json_value(home));
     for (const auto* name : {"SystemRoot", "PATH"}) {
@@ -260,7 +261,7 @@ void launch_disposition(const char* executable)
 #ifdef _WIN32
     environment.platform_id = "windows-x86_64";
 #else
-    environment.platform_id = "linux-x86_64";
+    environment.platform_id = addon::host_platform_id();
 #endif
 #ifdef _WIN32
     const auto home = addon::path_to_utf8(root / "selected");
@@ -427,7 +428,7 @@ void resume_policy(const char* executable)
 #ifdef _WIN32
     environment.platform_id = "windows-x86_64";
 #else
-    environment.platform_id = "linux-x86_64";
+    environment.platform_id = addon::host_platform_id();
 #endif
     environment.effective_environment.set("QWEN_HOME", addon::Json_value(home));
     environment.effective_environment.set("OPENAI_API_KEY", addon::Json_value("frozen-fixture-key"));
@@ -660,7 +661,7 @@ void account_names()
     const std::string platform = "windows-x86_64";
     const std::string home     = "C:/Users/Jane Doe";
 #else
-    const std::string platform = "linux-x86_64";
+    const std::string platform = addon::host_platform_id();
     const std::string home     = "/home/jane";
 #endif
     const auto discovered_account = [&](const std::string& qwen_home) -> std::optional<addon::Account_record> {

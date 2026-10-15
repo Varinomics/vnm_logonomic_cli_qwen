@@ -215,7 +215,7 @@ addon::Usage_scan_request request_for(const fs::path& home)
 #ifdef _WIN32
     environment.platform_id = "windows-x86_64";
 #else
-    environment.platform_id = "linux-x86_64";
+    environment.platform_id = addon::host_platform_id();
 #endif
     environment.effective_environment = qwen::object({{"QWEN_HOME", addon::Json_value(qwen::path_string(home))}});
     environment.bootstrap = addon::Environment_bootstrap_evidence{qwen::path_string(home)};
@@ -667,7 +667,7 @@ void profile_consumes_host_resolution_without_environment_mutation()
 #ifdef _WIN32
     environment.platform_id = "windows-x86_64";
 #else
-    environment.platform_id = "linux-x86_64";
+    environment.platform_id = addon::host_platform_id();
 #endif
     environment.effective_environment = qwen::object({{"QWEN_HOME", addon::Json_value("~\\nested\\profile")}});
     environment.bootstrap = addon::Environment_bootstrap_evidence{qwen::path_string(workspace.path / "resolved/profile")};
