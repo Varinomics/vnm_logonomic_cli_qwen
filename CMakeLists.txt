@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 cmake_policy(SET CMP0141 NEW)
-set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded)
+set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
 # A build that adds this package as a subproject sets the normal variable
 # LOGONOMIC_CLI_ADDON_EMBEDDED. That build owns the cache, try_compile()
 # settings, the SDK and testing (the SDK's docs/package_contract.md,
