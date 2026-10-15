@@ -27,8 +27,10 @@ namespace {
 
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
+#ifdef __linux__
 constexpr const char* k_session = "ac285bac-32fa-4764-b789-066ef86d9ab3";
 constexpr const char* k_binding = "bfc0b538f38596aef4ac803b9f182cde";
+#endif
 
 bool check(bool condition, const char* explanation)
 {
@@ -305,6 +307,6 @@ int main(int argc, char** argv)
     (void)argv;
     const auto preparation = qwen::prepare_session_wake({});
     return check(!preparation.available && preparation.reason == "qwen_peer_platform_unavailable",
-        "native Windows peer inbox explicitly reports capability unavailable") ? 0 : 1;
+        "native peer inbox explicitly reports capability unavailable on this platform") ? 0 : 1;
 #endif
 }
