@@ -1,6 +1,6 @@
 # Qwen Code add-on for Logonomic
 
-Standalone C++20 add-on for Qwen Code on Windows and Linux x86-64. It consumes
+Standalone C++20 add-on for Qwen Code on Windows/Linux x86-64 and macOS ARM64. It consumes
 only the public Logonomic CLI add-on SDK. Qwen Code is installed separately;
 this package does not install a CLI, log in, copy credentials, or call a paid API.
 
