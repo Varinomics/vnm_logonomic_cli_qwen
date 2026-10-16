@@ -127,7 +127,7 @@ stale or unsupported optional data cannot invalidate accounting, and bounded
 future carriers remain opaque. Original accounting has priority within source,
 cache, snapshot, result and page budgets. Published proof binds the actual
 account, record, total, snapshot and selected accepted manifest. Ordinary
-`usage-scan@1` and `usage-scan@2` results retain their accounting format.
+`usage-scan@2` results retain their accounting format.
 
 Native summaries contain no UUIDs or fork markers. A fork whose transcript was
 deleted before the package observed any copy provenance cannot be distinguished
@@ -165,8 +165,8 @@ build tree, or `package/<config>/logonomic.cli.qwen` with a multi-configuration
 generator. Windows
 compiler-invoking commands must use the user-wide queued-build policy.
 
-The package recipe proves the Windows/Linux x86-64 compiler target during
-configuration. `cmake --install` exports a fresh artifact beneath its install-time
+The package recipe proves the Windows/Linux x86-64 or macOS ARM64 compiler target
+during configuration. `cmake --install` exports a fresh artifact beneath its install-time
 prefix and preserves executable permissions. An existing per-package destination,
 including a dangling symlink, is refused. POSIX `DESTDIR` staging is supported;
 nonempty `DESTDIR` with a drive-letter prefix is refused. Export is not atomic:
