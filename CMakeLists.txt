@@ -76,6 +76,7 @@ qwen_target(qwen_launch_bridge)
 logonomic_cli_addon_package_platform(QWEN_PLATFORM)
 logonomic_cli_addon_package_directory(logonomic.cli.qwen QWEN_PACKAGE_DIRECTORY)
 configure_file(package/logonomic-cli-addon.json.in generated/logonomic-cli-addon.json @ONLY)
+logonomic_cli_addon_package_indexer(package_index_command package_index_dependencies)
 file(GLOB_RECURSE package_files CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/package/assets/*"
     "${CMAKE_CURRENT_SOURCE_DIR}/package/capabilities/*"
@@ -99,13 +100,14 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:qwen_adapter>" "${QWEN_PACKAGE_DIRECTORY}/adapter/qwen_adapter${CMAKE_EXECUTABLE_SUFFIX}"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:qwen_helper>" "${QWEN_PACKAGE_DIRECTORY}/helpers/qwen_helper${CMAKE_EXECUTABLE_SUFFIX}"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:qwen_launch_bridge>" "${QWEN_PACKAGE_DIRECTORY}/helpers/qwen_launch_bridge${CMAKE_EXECUTABLE_SUFFIX}"
-    COMMAND "$<TARGET_FILE:logonomic_cli_addon_index>" "${QWEN_PACKAGE_DIRECTORY}"
+    COMMAND ${package_index_command} "${QWEN_PACKAGE_DIRECTORY}"
         --third-party "assets/qwen_dark.svg" "notices/qwen-LICENSE.txt"
             "provenance/qwen_logo.json"
         --third-party "assets/qwen_light.svg" "notices/qwen-LICENSE.txt"
             "provenance/qwen_logo.json"
     DEPENDS qwen_adapter qwen_helper qwen_launch_bridge logonomic_cli_addon_index
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt" ${package_files}
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt"
+        ${package_files} ${package_index_dependencies}
     VERBATIM)
 add_custom_target(qwen_package ALL DEPENDS "${QWEN_PACKAGE_DIRECTORY}/package.files.json")
 logonomic_cli_addon_install_package("${QWEN_PACKAGE_DIRECTORY}" logonomic.cli.qwen TARGET qwen_package)
