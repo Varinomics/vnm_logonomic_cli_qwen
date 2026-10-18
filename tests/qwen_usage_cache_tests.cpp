@@ -10,6 +10,7 @@
 #include <logonomic_cli_addon/usage_scan.h>
 
 #include <cstdint>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -86,6 +87,23 @@ void write(const fs::path& path, const std::string& bytes)
     check(output.good(), "local telemetry fixture write failed");
 }
 
+std::string read_bytes(const fs::path& path)
+{
+    std::ifstream input(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(input), {});
+}
+
+std::string transcript_row(const std::string& session, const std::string& uuid, unsigned tokens)
+{
+    return "{\"sessionId\":\"" + session + "\",\"uuid\":\"" + uuid + "\","
+        "\"timestamp\":\"2026-09-11T23:59:59.125Z\",\"cwd\":\"\",\"type\":\"system\","
+        "\"subtype\":\"ui_telemetry\",\"systemPayload\":{\"uiEvent\":{"
+        "\"event.name\":\"qwen-code.api_response\",\"model\":\"qwen3\","
+        "\"input_token_count\":" + std::to_string(tokens) + ",\"output_token_count\":0,"
+        "\"cached_content_token_count\":0,\"thoughts_token_count\":0,\"total_token_count\":" +
+        std::to_string(tokens) + "}}}\n";
+}
+
 std::vector<fs::path> write_sources(const fs::path& profile, unsigned tokens)
 {
 
@@ -99,13 +117,7 @@ std::vector<fs::path> write_sources(const fs::path& profile, unsigned tokens)
     const auto path = profile / "usage_record.jsonl";
     write(path, history);
     const auto transcript = profile / "projects/repo/chats/session-0.jsonl";
-    write(transcript, "{\"sessionId\":\"session-0\",\"uuid\":\"original-call\","
-        "\"timestamp\":\"2026-09-11T23:59:59.125Z\",\"cwd\":\"\",\"type\":\"system\","
-        "\"subtype\":\"ui_telemetry\",\"systemPayload\":{\"uiEvent\":{"
-        "\"event.name\":\"qwen-code.api_response\",\"model\":\"qwen3\","
-        "\"input_token_count\":" + std::to_string(tokens) + ",\"output_token_count\":0,"
-        "\"cached_content_token_count\":0,\"thoughts_token_count\":0,\"total_token_count\":" +
-        std::to_string(tokens) + "}}}\n");
+    write(transcript, transcript_row("session-0", "original-call", tokens));
     return {path, transcript};
 }
 
@@ -120,6 +132,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     options.package_directory = package;
     options.profile_storage_root = fixture / "host-storage";
     addon::Host_simulator host(options, nullptr);
+    auto* active_host = &host;
     addon::Contract_failure failure;
     check(host.start(&failure), failure.detail);
     std::string error;
@@ -146,9 +159,9 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
         "packaged adapter acknowledges allocated storage");
 
     const auto outcome_for = [&](const addon::Usage_scan_request& input, std::uint16_t version) {
-        const auto id = host.invoke({"usage-scan", version}, "scan",
+        const auto id = active_host->invoke({"usage-scan", version}, "scan",
             addon::encode_usage_scan_request(input, version), 30000);
-        const auto outcome = host.wait_outcome(id, 31000);
+        const auto outcome = active_host->wait_outcome(id, 31000);
         check(outcome.has_value(), "packaged scan must finish");
         return *outcome;
     };
@@ -261,6 +274,101 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
         }
     }
 
+    // Native size/time identity is the incremental oracle. Repair deliberately
+    // rereads even a correction that preserves both, across an adapter restart.
+    std::vector<fs::file_time_type> original_times;
+    std::vector<std::uintmax_t> original_sizes;
+    for (const auto& path : sources) {
+        original_times.push_back(fs::last_write_time(path));
+        original_sizes.push_back(fs::file_size(path));
+    }
+    sources = write_sources(profile, 20);
+    for (std::size_t index = 0; index < sources.size(); ++index) {
+        check(fs::file_size(sources[index]) == original_sizes[index], "same-size native correction fixture");
+        fs::last_write_time(sources[index], original_times[index]);
+    }
+    check(host.shutdown(1000, nullptr), "stop original adapter before durable incremental replay");
+    addon::Host_simulator restarted_host(options, nullptr);
+    check(restarted_host.start(&failure), failure.detail);
+    active_host = &restarted_host;
+    const auto restarted_ack = active_host->invoke({"profile-storage", 1}, "acknowledge",
+        addon::Json_value::object(), 5000, invocation);
+    const auto restarted_acknowledged = active_host->wait_outcome(restarted_ack, 6000);
+    check(restarted_acknowledged && restarted_acknowledged->status == addon::Host_status::SUCCESS,
+        "restarted adapter acknowledges the retained host allocation");
+    select("unchanged-restarted", first.cache_candidate);
+    const auto unchanged = all_pages(request, 3);
+    check(total(unchanged) == 2700 && !unchanged.incomplete_historical_coverage,
+        "incremental replay reuses unchanged source identities and preserves complete source coverage");
+    select("repair-unchanged", unchanged.cache_candidate);
+    request.mode = "repair";
+    check(total(all_pages(request, 3)) == 5400,
+        "full repair rereads native corrections despite unchanged size and timestamp");
+
+    const auto original_records_path = addon::usage_cache_io_path(
+        addon::path_from_utf8(first.cache_candidate->root) / "records");
+    for (const auto version : {0, 999}) {
+        select("index-upgrade-input-" + std::to_string(version), std::nullopt);
+        const auto input_root = request.cache_selection->candidate_root;
+        const auto input_path = addon::usage_cache_io_path(addon::path_from_utf8(input_root));
+        write(input_path / "records", read_bytes(original_records_path));
+        if (version != 0) {
+            write(input_path / "source-index", "{\"version\":999}\n");
+        }
+        const auto sealed = addon::seal_usage_cache_candidate(input_root, *allocated,
+            request.context.account_context, "index-upgrade", "qwen-evidence-cache@1",
+            [] { return false; }, &failure);
+        check(sealed.has_value(), "seal optional-index upgrade fixture: " + failure.detail);
+        select("index-upgrade-output-" + std::to_string(version), sealed);
+        const auto upgraded = all_pages(request, 3);
+        check(total(upgraded) == 5400,
+            "absent or unknown optional index rereads native sources without losing accepted accounting");
+    }
+
+    sources = write_sources(profile, 10);
+    const auto added_source = profile / "projects/repo/chats/incremental-new.jsonl";
+    const auto original_event = transcript_row("incremental-new", "first-call", 7);
+    write(added_source, original_event);
+    fs::last_write_time(added_source, original_times.front() - std::chrono::hours(24));
+    select("backdated-new", first.cache_candidate);
+    const auto discovered = all_pages(request, 3);
+    check(total(discovered) == 2707, "incremental discovery includes new files older than the previous scan");
+    const auto appended_events = original_event + transcript_row("incremental-new", "second-call", 5);
+    write(added_source, appended_events);
+    select("appended", discovered.cache_candidate);
+    const auto appended = all_pages(request, 3);
+    check(total(appended) == 2712, "incremental update reconciles appended events exactly once");
+    select("appended-unchanged", appended.cache_candidate);
+    check(total(all_pages(request, 3)) == 2712, "unchanged replay does not count the append again");
+    const auto duplicate_source = profile / "projects/repo/chats/duplicate.jsonl";
+    write(duplicate_source, original_event);
+    select("duplicate-live", appended.cache_candidate);
+    check(outcome_for(request, 3).reason_code == "usage_session_conflict",
+        "reused sources still participate in duplicate live session detection");
+    check(fs::remove(duplicate_source), "remove duplicate source fixture");
+    check(fs::remove(added_source), "remove accepted source fixture");
+    select("deleted-incremental", appended.cache_candidate);
+    const auto deleted = all_pages(request, 3);
+    check(total(deleted) == 2712 && deleted.incomplete_historical_coverage,
+        "incremental update retains accepted events after source deletion");
+    select("deleted-repair", deleted.cache_candidate);
+    request.mode = "repair";
+    check(total(all_pages(request, 3)) == 2712, "full repair preserves accepted history with deleted sources");
+
+    write(added_source, original_event + "{\"sessionId\"");
+    select("partial-source", first.cache_candidate);
+    const auto partial = all_pages(request, 3);
+    check(total(partial) == 2707 && partial.incomplete_historical_coverage,
+        "partial source retains its complete observed event");
+    const auto partial_index = read_bytes(addon::usage_cache_io_path(
+        addon::path_from_utf8(partial.cache_candidate->root) / "source-index"));
+    check(partial_index.find("incremental-new") == std::string::npos,
+        "partial files cannot acquire a reusable complete-source marker");
+    write(added_source, appended_events);
+    select("partial-completed", partial.cache_candidate);
+    check(total(all_pages(request, 3)) == 2712, "completed append recovers after partial input");
+    check(fs::remove(added_source), "remove completed partial-source fixture");
+
     select("account-v1", std::nullopt);
     request.context.account_context->version = 1;
     request.context.account_context->profile_path.reset();
@@ -310,10 +418,6 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
 
     // Oracle: optional carrier failure cannot change the admitted original
     // event grammar, footer, cache owner or summary accounting.
-    const auto read_bytes = [](const fs::path& path) {
-        std::ifstream input(path, std::ios::binary);
-        return std::string(std::istreambuf_iterator<char>(input), {});
-    };
     const auto original_records = read_bytes(addon::usage_cache_io_path(
         addon::path_from_utf8(first.cache_candidate->root) / "records"));
     std::vector<std::string> causal_failures;
@@ -501,7 +605,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     write(addon::usage_cache_io_path(addon::path_from_utf8(first.cache_candidate->root) / "unlisted"), "unexpected");
     check(outcome_for(request, 3).status != addon::Host_status::SUCCESS,
         "corrupt selected inventory fails without fallback");
-    check(host.shutdown(1000, nullptr), "packaged adapter exits without contacting a model");
+    check(active_host->shutdown(1000, nullptr), "packaged adapter exits without contacting a model");
 }
 
 } // namespace

@@ -40,6 +40,7 @@ constexpr std::uint64_t k_max_exact = 9007199254740991;
 constexpr std::size_t k_max_line_bytes = 4 * 1024 * 1024;
 constexpr std::size_t k_max_page_bytes = 2 * 1024 * 1024;
 constexpr std::size_t k_snapshot_bytes = 1024ULL * 1024 * 1024;
+constexpr std::size_t k_source_index_bytes = 16 * 1024 * 1024;
 
 class Usage_error final : public std::runtime_error
 {
@@ -98,6 +99,56 @@ struct Evidence
     std::map<std::string, addon::Usage_record> summaries;
     std::map<std::string, Transcript> transcripts;
 };
+
+struct Source_fingerprint
+{
+    std::uint64_t bytes = 0;
+    std::string   modified;
+    std::string   session;
+};
+
+struct Source_index
+{
+    std::map<std::string, Source_fingerprint> files;
+    std::size_t bytes = 0;
+};
+
+std::optional<Source_fingerprint> source_fingerprint(const fs::path& path)
+{
+    std::error_code error;
+    const auto bytes = fs::file_size(path, error);
+    if (error || bytes > k_max_exact) {
+        return std::nullopt;
+    }
+    const auto modified = fs::last_write_time(path, error);
+    if (error) {
+        return std::nullopt;
+    }
+    return Source_fingerprint{bytes, std::to_string(modified.time_since_epoch().count()), {}};
+}
+
+bool same_source(const Source_fingerprint& left, const Source_fingerprint& right)
+{
+    return left.bytes == right.bytes && left.modified == right.modified;
+}
+
+Json encode_source(const std::string& path, const Source_fingerprint& fingerprint)
+{
+    return object({
+        {"path",     Json(path)},
+        {"bytes",    Json(fingerprint.bytes)},
+        {"modified", Json(fingerprint.modified)},
+        {"session",  Json(fingerprint.session)}});
+}
+
+void remember_source(Source_index& index, const std::string& path, Source_fingerprint fingerprint)
+{
+    const auto bytes = addon::serialize_json(encode_source(path, fingerprint)).size() + 1;
+    if (bytes <= k_source_index_bytes - index.bytes) {
+        index.files.emplace(path, std::move(fingerprint));
+        index.bytes += bytes;
+    }
+}
 
 Json encode_event(std::string_view session, std::string_view uuid, const Event& event);
 std::uint64_t transcript_core_bytes(std::string_view id, const Transcript& transcript);
@@ -351,13 +402,13 @@ void reconcile_instant(Event& event, const Event& previous)
     }
 }
 
-void append_transcript(
+bool append_transcript(
     const fs::path& file, Evidence& evidence, std::set<std::string>& seen,
-    Budget& budget, addon::Invocation_context& context)
+    Budget& budget, addon::Invocation_context& context, std::string& session_id)
 {
     Transcript current;
     std::uint64_t staged_bytes = 0;
-    read_objects(file, budget, context, [&](const Json& row) {
+    bool complete = read_objects(file, budget, context, [&](const Json& row) {
         if (current.metadata.record_id.empty()) {
             Session session;
             configure(session, text(row, "sessionId"), transcript_date(text(row, "timestamp")),
@@ -426,9 +477,10 @@ void append_transcript(
         }
     });
     if (current.metadata.record_id.empty()) {
-        return;
+        return complete;
     }
     const auto id = current.metadata.record_id;
+    session_id = id;
     if (!seen.insert(id).second) {
         throw Usage_error("usage_session_conflict");
     }
@@ -443,6 +495,7 @@ void append_transcript(
         check_cancel(context);
         if (!current.events.contains(uuid)) {
             budget.incomplete = true;
+            complete = false;
         }
     }
     retained.metadata = std::move(current.metadata);
@@ -466,6 +519,7 @@ void append_transcript(
         budget.optional_resident_bytes -= previous_optional + staged_optional;
         budget.optional_resident_bytes += transcript_optional_bytes(id, retained);
     }
+    return complete;
 }
 
 void accumulate(Model& model, const Event& event)
@@ -514,15 +568,13 @@ addon::Usage_record aggregate(const addon::Usage_record& metadata, const std::ma
     return session.record;
 }
 
-void collect(
-    const fs::path& home, Evidence& evidence, Budget& budget, addon::Invocation_context& context)
+bool collect_summaries(
+    const fs::path& history, Evidence& evidence, Budget& budget, addon::Invocation_context& context)
 {
-    if (!fs::is_directory(home)) throw Usage_error("usage_profile_unavailable");
-    initialize_evidence_budget(evidence, budget, context);
     std::map<std::string, Session> sessions;
     std::uint64_t staged_summary_bytes = 0;
-    const auto history = home / "usage_record.jsonl";
     bool summaries_complete = true;
+    bool retained_complete = true;
     if (fs::exists(history)) {
         bool understood = true;
         const bool framed = read_objects(history, budget, context, [&](const Json& row) {
@@ -556,6 +608,7 @@ void collect(
         check_cancel(context);
         if (!sessions.contains(id.substr(5))) {
             budget.incomplete = true;
+            retained_complete = false;
         }
     }
     for (auto& [id, session] : sessions) {
@@ -582,6 +635,33 @@ void collect(
                 addon::serialize_json(object({{"summary", addon::encode_usage_record(accepted->second, 2)}})).size() + 1);
         }
     }
+    return summaries_complete && retained_complete;
+}
+
+void collect(
+    const fs::path& home, Evidence& evidence, Budget& budget,
+    addon::Invocation_context& context, Source_index* source_index)
+{
+    if (!fs::is_directory(home)) throw Usage_error("usage_profile_unavailable");
+    initialize_evidence_budget(evidence, budget, context);
+    Source_index previous;
+    if (source_index) {
+        std::swap(previous, *source_index);
+    }
+    const auto history = home / "usage_record.jsonl";
+    const auto history_path = path_string(history);
+    const auto before = source_index ? source_fingerprint(history) : std::nullopt;
+    const auto retained = previous.files.find(history_path);
+    if (before && retained != previous.files.end() && same_source(*before, retained->second)) {
+        remember_source(*source_index, history_path, retained->second);
+    }
+    else {
+        const auto complete = collect_summaries(history, evidence, budget, context);
+        const auto after = before ? source_fingerprint(history) : std::nullopt;
+        if (complete && before && after && same_source(*before, *after)) {
+            remember_source(*source_index, history_path, *after);
+        }
+    }
     std::set<std::string> seen;
     // usageHistoryService owns exactly global/projects/*/chats/*.jsonl.
     // QWEN_RUNTIME_DIR and nested debug/artifact files are not recovery inputs.
@@ -596,7 +676,23 @@ void collect(
             budget.entry();
             const auto name = path_string(entry.path().filename());
             if (!name.ends_with(".jsonl") || name.ends_with(".ledger.jsonl") || !entry.is_regular_file()) continue;
-            append_transcript(entry.path(), evidence, seen, budget, context);
+            const auto path = path_string(entry.path());
+            const auto fingerprint = source_index ? source_fingerprint(entry.path()) : std::nullopt;
+            const auto saved = previous.files.find(path);
+            if (fingerprint && saved != previous.files.end() && same_source(*fingerprint, saved->second)) {
+                if (!saved->second.session.empty() && !seen.insert(saved->second.session).second) {
+                    throw Usage_error("usage_session_conflict");
+                }
+                remember_source(*source_index, path, saved->second);
+                continue;
+            }
+            std::string session_id;
+            const auto complete = append_transcript(entry.path(), evidence, seen, budget, context, session_id);
+            auto after = fingerprint ? source_fingerprint(entry.path()) : std::nullopt;
+            if (complete && fingerprint && after && same_source(*fingerprint, *after)) {
+                after->session = std::move(session_id);
+                remember_source(*source_index, path, std::move(*after));
+            }
             if (evidence.transcripts.size() > budget.limits.records) {
                 throw Usage_error("usage_history_capacity");
             }
@@ -1474,6 +1570,81 @@ std::optional<Evidence> read_cache(const fs::path& path, std::string_view owner,
     throw Usage_error("usage_cache_incomplete");
 }
 
+Source_index read_source_index(
+    const fs::path& path, const Evidence& evidence, addon::Invocation_context& context)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return {};
+    }
+    Budget budget{Usage_limits{}};
+    budget.limits.source_bytes = k_source_index_bytes;
+    Source_index index;
+    std::string line;
+    try {
+        if (!read_line(input, &line, budget, context)) {
+            return {};
+        }
+        const auto header = parse(line);
+        if (!header || !exact_keys(*header, {"version"}) || integer(member(*header, "version")) != 1) {
+            return {};
+        }
+        while (read_line(input, &line, budget, context)) {
+            check_cancel(context);
+            budget.entry();
+            const auto row = parse(line);
+            if (!row || !exact_keys(*row, {"path", "bytes", "modified", "session"})) {
+                return {};
+            }
+            const auto bytes = integer(member(*row, "bytes"));
+            if (!bytes || !bounded_string(member(*row, "path"), 32768) ||
+                !bounded_string(member(*row, "modified"), 32) ||
+                !bounded_string(member(*row, "session"), 2053, true))
+            {
+                return {};
+            }
+            const auto source = text(*row, "path");
+            const auto session = text(*row, "session");
+            if (!session.empty()) {
+                const auto transcript = evidence.transcripts.find(session);
+                if (transcript == evidence.transcripts.end() || transcript->second.metadata.source_path != source) {
+                    return {};
+                }
+            }
+            if (index.files.contains(source)) {
+                return {};
+            }
+            remember_source(index, source, Source_fingerprint{*bytes, text(*row, "modified"), session});
+        }
+    }
+    catch (const Usage_error&) {
+        check_cancel(context);
+        // The index only avoids native parsing; accepted accounting remains
+        // usable when this optional acceleration cannot be understood.
+        return {};
+    }
+    return index;
+}
+
+void write_source_index(
+    const fs::path& directory, const Source_index& index, addon::Invocation_context& context)
+{
+    const auto records_bytes = fs::file_size(directory / "records");
+    if (records_bytes > k_snapshot_bytes || index.bytes + 32 > k_snapshot_bytes - records_bytes) {
+        return;
+    }
+    std::ofstream output(directory / "source-index", std::ios::binary | std::ios::trunc);
+    output << "{\"version\":1}\n";
+    for (const auto& [path, fingerprint] : index.files) {
+        check_cancel(context);
+        output << addon::serialize_json(encode_source(path, fingerprint)) << '\n';
+    }
+    output.close();
+    if (!output) {
+        throw Usage_error("usage_storage_write_failed");
+    }
+}
+
 void replace_cache(const fs::path& directory, std::string_view owner,
     const Evidence& evidence, addon::Invocation_context& context)
 {
@@ -1567,8 +1738,12 @@ void collect_retained(const addon::Usage_scan_request& request, const fs::path& 
                 *selection.accepted, root, request.context.account_context,
                 [&context] { return context.cancel_requested(); }, &failure);
             if (!manifest) throw Usage_error(failure.reason_code);
-            if (manifest->format != "qwen-evidence-cache@1" || manifest->files.size() != 1 ||
-                manifest->files.front().path != "records")
+            const bool has_records = std::any_of(manifest->files.begin(), manifest->files.end(),
+                [](const auto& file) { return file.path == "records"; });
+            const bool known_files = std::all_of(manifest->files.begin(), manifest->files.end(),
+                [](const auto& file) { return file.path == "records" || file.path == "source-index"; });
+            if (manifest->format != "qwen-evidence-cache@1" || !has_records || !known_files ||
+                manifest->files.size() > 2)
             {
                 throw Usage_error("usage_cache_format_unsupported");
             }
@@ -1586,7 +1761,11 @@ void collect_retained(const addon::Usage_scan_request& request, const fs::path& 
         throw Usage_error("native_cache_evidence_unavailable");
     Budget budget{Usage_limits{}};
     auto evidence = retained ? std::move(*retained) : Evidence{};
-    collect(home, evidence, budget, context);
+    Source_index source_index;
+    if (request.cache_selection && retained && request.mode == "incremental") {
+        source_index = read_source_index(input_file.parent_path() / "source-index", evidence, context);
+    }
+    collect(home, evidence, budget, context, request.cache_selection ? &source_index : nullptr);
     candidate.records = records_for(evidence, budget, context, context.request().capability.version == 3);
     candidate.incomplete = budget.incomplete;
     for (const auto& record : candidate.records) {
@@ -1597,6 +1776,9 @@ void collect_retained(const addon::Usage_scan_request& request, const fs::path& 
     }
     (void)bound_optional_evidence(evidence, context);
     replace_cache(directory, owner, evidence, context);
+    if (request.cache_selection) {
+        write_source_index(directory, source_index, context);
+    }
 }
 
 } // namespace
@@ -1606,7 +1788,7 @@ std::vector<addon::Usage_record> scan_usage(const fs::path& home,
 {
     Budget budget{limits};
     Evidence evidence;
-    collect(home, evidence, budget, context);
+    collect(home, evidence, budget, context, nullptr);
     return records_for(evidence, budget, context);
 }
 
