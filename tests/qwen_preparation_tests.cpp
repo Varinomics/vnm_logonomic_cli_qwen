@@ -25,6 +25,8 @@
 #include <utility>
 #include <vector>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 
 namespace addon = logonomic::cli_addon;
@@ -56,7 +58,7 @@ void wake_patch(const addon::Launch_patch& patch)
     require(patch.session_wake.has_value(), "a negotiated managed launch reports wake readiness");
 #ifdef __linux__
     const auto& wake = *patch.session_wake;
-    const auto token = qwen::text(wake.binding, "launch_token");
+    const auto token = json_util::text(wake.binding, "launch_token");
     const auto entry = std::find(patch.set.begin(), patch.set.end(),
         std::pair<std::string, std::string>{qwen::k_wake_binding_environment, token});
     require(wake.available && token.size() == 32 && entry != patch.set.end(),
@@ -387,14 +389,14 @@ void direct_launch_starts_selected_program(const char* executable)
         std::ifstream input(root / "selected" / "capture.json", std::ios::binary);
         const std::string content{std::istreambuf_iterator<char>(input), {}};
         const auto capture = addon::parse_json(content, {}, nullptr);
-        require(capture && addon::path_from_utf8(qwen::text(*capture, "executable")) == fs::absolute(fake) &&
-            qwen::text(*capture, "profile") == home, "the selected child receives the original native profile");
+        require(capture && addon::path_from_utf8(json_util::text(*capture, "executable")) == fs::absolute(fake) &&
+            json_util::text(*capture, "profile") == home, "the selected child receives the original native profile");
         std::vector<std::string> actual;
         for (const auto& argument : capture->find("argv")->as_array()) {
             actual.push_back(argument.as_string());
         }
         require(actual == options, "fresh script-shim launch preserves model and permission arguments exactly");
-        std::cout << "fresh direct child=" << qwen::text(*capture, "executable")
+        std::cout << "fresh direct child=" << json_util::text(*capture, "executable")
             << " argv=" << addon::serialize_json(*capture->find("argv")) << '\n';
     }
 }
@@ -466,13 +468,13 @@ void resume_policy(const char* executable)
     const auto direct_capture = run_resume_process(*result, request, fs::absolute(executable));
     const auto* direct_arguments = direct_capture.find("argv");
     require(direct_arguments && direct_arguments->is_array() &&
-        addon::path_from_utf8(qwen::text(direct_capture, "executable")) == fs::absolute(fake) &&
-        qwen::text(direct_capture, "profile") == home &&
+        addon::path_from_utf8(json_util::text(direct_capture, "executable")) == fs::absolute(fake) &&
+        json_util::text(direct_capture, "profile") == home &&
         direct_arguments->as_array() == addon::Json_value::Array{
             addon::Json_value("--resume"), addon::Json_value("019933a1-6e43-7102-a520-b3c8294cc763")},
         "direct resume must execute the selected Qwen file with its profile and exact ID");
-    std::cout << "direct resume child=" << qwen::text(direct_capture, "executable")
-        << " profile=" << qwen::text(direct_capture, "profile")
+    std::cout << "direct resume child=" << json_util::text(direct_capture, "executable")
+        << " profile=" << json_util::text(direct_capture, "profile")
         << " argv=" << addon::serialize_json(*direct_arguments) << '\n';
     const auto shims = root / "shims";
     fs::create_directories(shims);
@@ -585,8 +587,8 @@ void resume_policy(const char* executable)
             const auto capture = run_resume_process(*prepared, request, fs::absolute(executable));
             const auto* arguments = capture.find("argv");
             require(arguments && arguments->is_array() &&
-                addon::path_from_utf8(qwen::text(capture, "executable")) == fs::absolute(fake) &&
-                qwen::text(capture, "profile") == home,
+                addon::path_from_utf8(json_util::text(capture, "executable")) == fs::absolute(fake) &&
+                json_util::text(capture, "profile") == home,
                 "the fake child must retain its executable and Qwen profile");
             std::vector<std::string> actual;
             for (const auto& item : arguments->as_array()) {
@@ -600,8 +602,8 @@ void resume_policy(const char* executable)
                 marker >> selected;
                 require(selected == "ps1", "bare Qwen must use PowerShell's selected script, not the cmd shim");
             }
-            std::cout << name << " child=" << qwen::text(capture, "executable")
-                << " profile=" << qwen::text(capture, "profile")
+            std::cout << name << " child=" << json_util::text(capture, "executable")
+                << " profile=" << json_util::text(capture, "profile")
                 << " argv=" << addon::serialize_json(*arguments)
                 << " selection=" << (shim ? "powershell-qwen.ps1" : "call-operator-qwen.exe") << '\n';
         }

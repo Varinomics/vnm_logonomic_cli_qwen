@@ -7,6 +7,8 @@
 #include <filesystem>
 #include <system_error>
 #include <utility>
+namespace json_util = logonomic::cli_addon::json;
+
 namespace qwen {
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
@@ -278,29 +280,29 @@ std::optional<Powershell_selection> inspect_powershell_launcher(
         return std::nullopt;
     }
     const auto decoded = addon::decode_base64(trim(output->output.substr(marker_position + marker.size())));
-    const auto result = decoded ? parse(*decoded) : std::nullopt;
-    if (!result || !exact_keys(*result, {"path", "args"}) ||
-        !bounded_string(member(*result, "path"), 4096) ||
-        !member(*result, "args").is_array())
+    const auto result = decoded ? json_util::parse(*decoded) : std::nullopt;
+    if (!result || !json_util::exact_keys(*result, {"path", "args"}) ||
+        !json_util::bounded_string(json_util::member(*result, "path"), 4096) ||
+        !json_util::member(*result, "args").is_array())
     {
         return std::nullopt;
     }
     Powershell_selection selection;
     selection.shell = path_string(*shell);
-    selection.program = text(*result, "path");
+    selection.program = json_util::text(*result, "path");
     if (base_name(selection.program) != "qwen") {
         return std::nullopt;
     }
     selection.option_values.push_back(selection.program);
-    for (const auto& argument : member(*result, "args").as_array()) {
-        if (!exact_keys(argument, {"source", "value"}) ||
-            !bounded_string(member(argument, "source"), 4096) ||
-            !bounded_string(member(argument, "value"), 4096, true))
+    for (const auto& argument : json_util::member(*result, "args").as_array()) {
+        if (!json_util::exact_keys(argument, {"source", "value"}) ||
+            !json_util::bounded_string(json_util::member(argument, "source"), 4096) ||
+            !json_util::bounded_string(json_util::member(argument, "value"), 4096, true))
         {
             return std::nullopt;
         }
-        selection.argument_expressions.push_back(text(argument, "source"));
-        selection.option_values.push_back(text(argument, "value"));
+        selection.argument_expressions.push_back(json_util::text(argument, "source"));
+        selection.option_values.push_back(json_util::text(argument, "value"));
     }
     return plain_session_options(selection.option_values) ? std::optional(std::move(selection)) : std::nullopt;
 }

@@ -8,6 +8,8 @@
 #include <string_view>
 #include <utility>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace qwen {
 namespace {
 
@@ -25,8 +27,8 @@ addon::Classify_event_result classify_event(const addon::Classify_event_request&
 {
     addon::Classify_event_result result;
     const auto& body = request.event.body;
-    const auto session = text(body, "session_id");
-    const auto agent = text(body, "agent_id");
+    const auto session = json_util::text(body, "session_id");
+    const auto agent = json_util::text(body, "agent_id");
     const auto& name = request.event.name;
     if (!identity(session)) {
         result.lifecycle_degradation = addon::Lifecycle_degradation{};
@@ -38,17 +40,17 @@ addon::Classify_event_result classify_event(const addon::Classify_event_request&
     addon::Lifecycle_observation observation;
     observation.provider_event_name = name;
     observation.provider_session_id = session;
-    observation.provider_event_id = text(body, "event_id");
+    observation.provider_event_id = json_util::text(body, "event_id");
     if (!identity(observation.provider_event_id)) {
         result.lifecycle_degradation = addon::Lifecycle_degradation{1, session};
         return result;
     }
-    const auto turn = text(body, "prompt_id");
+    const auto turn = json_util::text(body, "prompt_id");
     if (!turn.empty() && identity(turn)) {
         observation.provider_turn_id = turn;
     }
     if (name == "SessionStart") {
-        const auto source = text(body, "source");
+        const auto source = json_util::text(body, "source");
         if (source != "startup" && source != "resume" && source != "branch" && source != "clear") {
             // Compaction preserves the Config session identity. Clear and
             // branch rotate it before the caller initializes the next chat.
@@ -61,7 +63,7 @@ addon::Classify_event_result classify_event(const addon::Classify_event_request&
         }
         observation.session_transition = addon::Session_transition::STARTED;
         observation.session_source = source;
-        observation.resume_record = object({{"provider_session_id", Json(session)}});
+        observation.resume_record = json_util::object({{"provider_session_id", Json(session)}});
         result.classification = addon::Classification::TRANSITION;
         result.transition = observation.session_source == "resume"
             ? addon::Transition_kind::RESUME : addon::Transition_kind::START;
@@ -75,7 +77,7 @@ addon::Classify_event_result classify_event(const addon::Classify_event_request&
         result.classification = addon::Classification::EVENT;
         if (name == "SessionEnd") {
             observation.session_transition = addon::Session_transition::ENDED;
-            observation.session_end_reason = text(body, "reason");
+            observation.session_end_reason = json_util::text(body, "reason");
         }
         else
         if (name == "UserPromptSubmit") {
@@ -96,8 +98,8 @@ addon::Classify_event_result classify_event(const addon::Classify_event_request&
             }
         }
         else
-        if (name == "Notification" && (text(body, "notification_type") == "permission_prompt" ||
-            text(body, "notification_type") == "elicitation_dialog"))
+        if (name == "Notification" && (json_util::text(body, "notification_type") == "permission_prompt" ||
+            json_util::text(body, "notification_type") == "elicitation_dialog"))
         {
             observation.attention_transition = addon::Attention_transition::REQUESTED;
             observation.attention_evidence = addon::Evidence::INFERRED;
@@ -124,7 +126,7 @@ addon::Attention_classification_result classify_attention(const addon::Attention
     {
         return result;
     }
-    const auto notification = text(request.base.event.body, "notification_type");
+    const auto notification = json_util::text(request.base.event.body, "notification_type");
     if (notification == "permission_prompt" || notification == "elicitation_dialog") {
         // Native notifications carry no paired question identity or answer.
         // Label the existing inferred observation without upgrading its evidence.

@@ -6,6 +6,8 @@
 #include <utility>
 #include <vector>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace qwen {
 namespace {
 
@@ -86,7 +88,7 @@ public:
                 }
             }
         }
-        const auto parsed = parse(m_json);
+        const auto parsed = json_util::parse(m_json);
         if (!parsed || !parsed->is_object()) {
             throw std::runtime_error("invalid_settings_object");
         }
@@ -147,7 +149,7 @@ public:
         auto cursor = skip(opening + 1);
         while (m_json.at(cursor) != '}') {
             const auto key_end = end(cursor);
-            const auto key = parse(std::string_view(m_json).substr(cursor, key_end - cursor));
+            const auto key = json_util::parse(std::string_view(m_json).substr(cursor, key_end - cursor));
             cursor = skip(skip(key_end) + 1);
             const auto value_end = end(cursor);
             result.push_back({key->as_string(), cursor, value_end});
@@ -167,10 +169,10 @@ public:
         const auto expected = logonomic::cli_addon::serialize_json_canonical(hook_entry(event));
         bool found = false;
         for (const auto& entry : array.as_array()) {
-            const auto& hooks = member(entry, "hooks");
+            const auto& hooks = json_util::member(entry, "hooks");
             if (hooks.is_array()) {
                 for (const auto& hook : hooks.as_array()) {
-                    if (text(hook, "name") == "logonomic:qwen:" + std::string(event)) {
+                    if (json_util::text(hook, "name") == "logonomic:qwen:" + std::string(event)) {
                         // Ownership covers the whole exact definition, including
                         // its matcher and execution policy, never a name alone.
                         if (found || logonomic::cli_addon::serialize_json_canonical(entry) != expected) {
@@ -223,7 +225,7 @@ Json hook_entry(std::string_view event)
     const char* shell = "bash";
     const char* command = "if [ -n \"$LOGONOMIC_PROVIDER_HELPERS_DIR\" ]; then \"$LOGONOMIC_PROVIDER_HELPERS_DIR/qwen_helper\"; fi";
 #endif
-    return object({{"hooks", Json(Json::Array{object({{"type", Json("command")},
+    return json_util::object({{"hooks", Json(Json::Array{json_util::object({{"type", Json("command")},
         {"name", Json("logonomic:qwen:" + std::string(event))}, {"command", Json(command)},
         {"shell", Json(shell)}, {"timeout", Json(25.0)}})})}});
 }
@@ -238,7 +240,7 @@ std::string updated_config(std::string_view settings)
     const std::string source = settings.empty() ? "{}" : std::string(settings);
     const Settings_document document(source);
     const auto& root = document.value();
-    const auto& disabled = member(root, "disableAllHooks");
+    const auto& disabled = json_util::member(root, "disableAllHooks");
     if (disabled.is_boolean() && disabled.as_boolean()) {
         throw std::runtime_error("hooks_disabled_by_user");
     }
@@ -246,7 +248,7 @@ std::string updated_config(std::string_view settings)
     const auto found = std::find_if(members.begin(), members.end(), [](const auto& entry) {
         return entry.name == "hooks";
     });
-    const auto& hooks = member(root, "hooks");
+    const auto& hooks = json_util::member(root, "hooks");
     if (found != members.end() && !hooks.is_object()) {
         throw std::runtime_error("invalid_hooks_object");
     }
@@ -260,7 +262,7 @@ std::string updated_config(std::string_view settings)
             return entry.name == event;
         });
         if (item != hook_members.end()) {
-            edits.emplace_back(*item, hook_document.hooks_array(*item, member(hooks, event), event));
+            edits.emplace_back(*item, hook_document.hooks_array(*item, json_util::member(hooks, event), event));
         }
         else {
             if (!additions.empty()) {

@@ -12,6 +12,8 @@
 #include <optional>
 #include <stdexcept>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 
 namespace addon = logonomic::cli_addon;
@@ -217,7 +219,7 @@ addon::Usage_scan_request request_for(const fs::path& home)
 #else
     environment.platform_id = addon::host_platform_id();
 #endif
-    environment.effective_environment = qwen::object({{"QWEN_HOME", addon::Json_value(qwen::path_string(home))}});
+    environment.effective_environment = json_util::object({{"QWEN_HOME", addon::Json_value(qwen::path_string(home))}});
     environment.bootstrap = addon::Environment_bootstrap_evidence{qwen::path_string(home)};
     request.context.launch_environment = std::move(environment);
     const auto storage = home / "package-storage";
@@ -669,7 +671,7 @@ void profile_consumes_host_resolution_without_environment_mutation()
 #else
     environment.platform_id = addon::host_platform_id();
 #endif
-    environment.effective_environment = qwen::object({{"QWEN_HOME", addon::Json_value("~\\nested\\profile")}});
+    environment.effective_environment = json_util::object({{"QWEN_HOME", addon::Json_value("~\\nested\\profile")}});
     environment.bootstrap = addon::Environment_bootstrap_evidence{qwen::path_string(workspace.path / "resolved/profile")};
     const auto profile = qwen::profile_from_environment(environment);
     require(profile.home == workspace.path / "resolved/profile", "host bootstrap proof owns profile resolution even without a native home variable");

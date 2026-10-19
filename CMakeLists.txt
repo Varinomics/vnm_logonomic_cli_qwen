@@ -176,7 +176,7 @@ if(LOGONOMIC_CLI_ADDON_RECIPE_TESTS)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     get_target_property(_membership_sdk_source logonomic_cli_addon_sdk::sdk SOURCE_DIR)
     add_test(NAME qwen_package_membership
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_membership_tests.py"
+        COMMAND "${Python3_EXECUTABLE}" "${_membership_sdk_source}/cmake/package_membership_tests.py"
             "--source=${CMAKE_CURRENT_SOURCE_DIR}" "--sdk=${_membership_sdk_source}"
             "--cmake=${CMAKE_COMMAND}" "--target=qwen_package" "--package-id=logonomic.cli.qwen"
             "--generator=${CMAKE_GENERATOR}" "--config=$<CONFIG>" "--build-type=${CMAKE_BUILD_TYPE}"
