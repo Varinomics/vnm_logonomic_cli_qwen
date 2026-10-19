@@ -22,6 +22,8 @@
 #include <sstream>
 #include <utility>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace qwen {
 namespace {
 
@@ -126,15 +128,15 @@ bool process_has_binding(int pid, std::string_view launch_token)
 
 std::optional<Peer_target> read_peer(const fs::path& path, std::string_view session_id, std::string_view launch_token)
 {
-    const auto parsed = parse(read_file(path));
-    if (!parsed || !member(*parsed, "schemaVersion").is_integer() ||
-        member(*parsed, "schemaVersion").as_integer() != 1 ||
-        text(*parsed, "sessionId") != session_id || !member(*parsed, "pid").is_integer() ||
-        !member(*parsed, "pidNs").is_integer())
+    const auto parsed = json_util::parse(read_file(path));
+    if (!parsed || !json_util::member(*parsed, "schemaVersion").is_integer() ||
+        json_util::member(*parsed, "schemaVersion").as_integer() != 1 ||
+        json_util::text(*parsed, "sessionId") != session_id || !json_util::member(*parsed, "pid").is_integer() ||
+        !json_util::member(*parsed, "pidNs").is_integer())
     {
         return std::nullopt;
     }
-    const auto pid = member(*parsed, "pid").as_integer();
+    const auto pid = json_util::member(*parsed, "pid").as_integer();
     if (pid <= 0 || pid > INT_MAX) {
         return std::nullopt;
     }
@@ -145,7 +147,7 @@ std::optional<Peer_target> read_peer(const fs::path& path, std::string_view sess
         name.ends_with(".json") && hex_string(std::string_view(name).substr(prefix.size() + 1, 8), 8);
     struct stat pid_namespace{};
     if ((!bare && !suffixed) || stat("/proc/self/ns/pid", &pid_namespace) != 0 ||
-        member(*parsed, "pidNs").as_integer() != static_cast<std::int64_t>(pid_namespace.st_ino))
+        json_util::member(*parsed, "pidNs").as_integer() != static_cast<std::int64_t>(pid_namespace.st_ino))
     {
         return std::nullopt;
     }
@@ -153,9 +155,9 @@ std::optional<Peer_target> read_peer(const fs::path& path, std::string_view sess
     result.record        = path;
     result.session_id    = std::string(session_id);
     result.pid           = static_cast<int>(pid);
-    result.process_start = text(*parsed, "procStart");
-    result.socket_path   = text(*parsed, "ipcPath");
-    result.token         = text(*parsed, "ipcToken");
+    result.process_start = json_util::text(*parsed, "procStart");
+    result.socket_path   = json_util::text(*parsed, "ipcPath");
+    result.token         = json_util::text(*parsed, "ipcToken");
     result.launch_token  = std::string(launch_token);
     if (result.process_start.empty() || result.process_start != process_start(result.pid) ||
         result.socket_path.empty() || result.socket_path.size() > 103 ||
@@ -291,26 +293,26 @@ public:
                 bytes.append(buffer.data(), static_cast<std::size_t>(count));
                 auto end = bytes.find('\n');
                 while (end != std::string::npos) {
-                    const auto frame = parse(std::string_view(bytes).substr(0, end));
+                    const auto frame = json_util::parse(std::string_view(bytes).substr(0, end));
                     bytes.erase(0, end + 1);
-                    if (!frame || !member(*frame, "msgV").is_integer() ||
-                        member(*frame, "msgV").as_integer() != 1)
+                    if (!frame || !json_util::member(*frame, "msgV").is_integer() ||
+                        json_util::member(*frame, "msgV").as_integer() != 1)
                     {
                         valid = false;
                         break;
                     }
                     if (!authenticated) {
-                        if (text(*frame, "type") != "auth" || text(*frame, "token") != m_token) {
+                        if (json_util::text(*frame, "type") != "auth" || json_util::text(*frame, "token") != m_token) {
                             valid = false;
                             break;
                         }
                         authenticated = true;
                     }
                     else
-                    if (text(*frame, "type") == "control" && text(*frame, "action") == "delivery_status" &&
-                        text(*frame, "origMsgId") == message_id && text(*frame, "from") == target.socket_path)
+                    if (json_util::text(*frame, "type") == "control" && json_util::text(*frame, "action") == "delivery_status" &&
+                        json_util::text(*frame, "origMsgId") == message_id && json_util::text(*frame, "from") == target.socket_path)
                     {
-                        const auto status = text(*frame, "status");
+                        const auto status = json_util::text(*frame, "status");
                         if (status == "delivered" || status == "held" || status == "denied" ||
                             status == "refused" || status == "expired" || status == "misaddressed" || status == "dropped")
                         {
@@ -396,12 +398,12 @@ Peer_result send_peer(const Peer_target& target, std::string_view message_id,
     }
     // Omit fromMode: the host cannot assert the originating agent's approval
     // class. Qwen's own inbound policy must admit or hold this ordinary peer.
-    const auto auth = object({{"msgV", Json(1)}, {"type", Json("auth")}, {"token", Json(target.token)}});
-    const auto frame = object({
+    const auto auth = json_util::object({{"msgV", Json(1)}, {"type", Json("auth")}, {"token", Json(target.token)}});
+    const auto frame = json_util::object({
         {"msgV", Json(1)}, {"msgId", Json(message_id)}, {"type", Json("user")},
         {"from", Json(inbox.path())}, {"replyToken", Json(inbox.token())},
         {"fromName", Json("Logonomic mailbox")}, {"toSessionId", Json(target.session_id)},
-        {"priority", Json("next")}, {"message", object({{"role", Json("user")}, {"content", Json(notification)}})}});
+        {"priority", Json("next")}, {"message", json_util::object({{"role", Json("user")}, {"content", Json(notification)}})}});
     const auto bytes = addon::serialize_json(auth) + "\n" + addon::serialize_json(frame) + "\n";
     std::size_t offset = 0;
     while (offset < bytes.size()) {

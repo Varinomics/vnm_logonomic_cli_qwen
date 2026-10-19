@@ -12,6 +12,8 @@
 #include <string_view>
 #include <utility>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 
 namespace addon = logonomic::cli_addon;
@@ -25,7 +27,7 @@ void require(bool condition, const char* message)
 
 qwen::Json parse(std::string_view bytes)
 {
-    const auto value = qwen::parse(bytes);
+    const auto value = json_util::parse(bytes);
     require(value.has_value(), "fixture JSON parses");
     return *value;
 }
@@ -91,17 +93,17 @@ void control_servers_are_session_scoped()
     require(first_end != std::string::npos, "initialize is one NDJSON record");
     const auto initialize = parse(std::string_view(input).substr(0, first_end));
     const auto session = parse(std::string_view(input).substr(first_end + 1, input.size() - first_end - 2));
-    require(qwen::text(initialize, "method") == "initialize", "first request initializes ACP");
-    require(qwen::text(session, "method") == "session/new", "second request creates the session");
-    const auto& params = qwen::member(session, "params");
-    require(qwen::text(params, "cwd") == "C:/work/repository", "host working directory is preserved");
-    const auto& servers = qwen::member(params, "mcpServers");
+    require(json_util::text(initialize, "method") == "initialize", "first request initializes ACP");
+    require(json_util::text(session, "method") == "session/new", "second request creates the session");
+    const auto& params = json_util::member(session, "params");
+    require(json_util::text(params, "cwd") == "C:/work/repository", "host working directory is preserved");
+    const auto& servers = json_util::member(params, "mcpServers");
     require(servers.is_array() && servers.as_array().size() == 1, "every admitted control server is injected once");
     const auto& mapped = servers.as_array().front();
-    require(qwen::text(mapped, "name") == "logonomic-task-task-7-control-a" &&
-        qwen::text(mapped, "command") == "C:/host/logonomic_task_server_relay.exe",
+    require(json_util::text(mapped, "name") == "logonomic-task-task-7-control-a" &&
+        json_util::text(mapped, "command") == "C:/host/logonomic_task_server_relay.exe",
         "task and server identity bind the host relay");
-    const auto& args = qwen::member(mapped, "args");
+    const auto& args = json_util::member(mapped, "args");
     require(args.is_array() && args.as_array().size() == 8 &&
         args.as_array()[0].as_string() == "--descriptor" &&
         args.as_array()[1].as_string() == "C:/work/repository/.task-7/.logonomic/task-servers.json" &&
@@ -109,7 +111,7 @@ void control_servers_are_session_scoped()
         args.as_array()[4].as_string() == "--attestation-path" && args.as_array()[5].as_string() == receipts.front().path &&
         args.as_array()[6].as_string() == "--attestation-nonce" && args.as_array()[7].as_string() == receipts.front().nonce,
         "the relay connects the named server and attests its catalog");
-    const auto& environment = qwen::member(mapped, "env");
+    const auto& environment = json_util::member(mapped, "env");
     require(environment.is_array() && environment.as_array().empty() && input.find("secret") == std::string::npos,
         "host control capabilities never reach ACP");
     require(input.find("modelId") == std::string::npos && input.find("authenticate") == std::string::npos,
@@ -120,8 +122,8 @@ void control_servers_are_session_scoped()
     const auto structured_input = qwen::initial_acp_input(structured);
     const auto structured_new = parse(std::string_view(structured_input).substr(
         structured_input.find('\n') + 1, structured_input.size() - structured_input.find('\n') - 2));
-    require(qwen::member(qwen::member(structured_new, "params"), "mcpServers").is_array() &&
-        qwen::member(qwen::member(structured_new, "params"), "mcpServers").as_array().empty(),
+    require(json_util::member(json_util::member(structured_new, "params"), "mcpServers").is_array() &&
+        json_util::member(json_util::member(structured_new, "params"), "mcpServers").as_array().empty(),
         "standalone structured implementation starts without delegated control servers");
 }
 

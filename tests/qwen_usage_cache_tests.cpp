@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 
 namespace addon = logonomic::cli_addon;
@@ -455,7 +457,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
                             opaque = std::move(nested);
                         }
                     }
-                    const auto future = qwen::object({{"version", addon::Json_value(2)}, {"opaque", std::move(opaque)}});
+                    const auto future = json_util::object({{"version", addon::Json_value(2)}, {"opaque", std::move(opaque)}});
                     row->set("temporal", future);
                 }
             }
@@ -465,7 +467,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
             digest.update("\n");
             if (!row->find("owner")) ++count;
         }
-        replacement += addon::serialize_json(qwen::object({{"end", addon::Json_value(1)},
+        replacement += addon::serialize_json(json_util::object({{"end", addon::Json_value(1)},
             {"count", addon::Json_value(count)},
             {"sha256", addon::Json_value(addon::to_hex(digest.finish()))}})) + '\n';
         select(std::string("carrier-input-") + kind, std::nullopt);

@@ -23,6 +23,8 @@
 #include <thread>
 #include <utility>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 
 namespace addon = logonomic::cli_addon;
@@ -98,7 +100,7 @@ public:
         if (stat("/proc/self/ns/pid", &info) != 0) {
             throw std::runtime_error("fixture_namespace");
         }
-        m_record = qwen::object({
+        m_record = json_util::object({
             {"schemaVersion", qwen::Json(1)}, {"pid", qwen::Json(static_cast<int>(getpid()))},
             {"pidNs", qwen::Json(static_cast<std::uint64_t>(info.st_ino))},
             {"procStart", qwen::Json(native_start())}, {"sessionId", qwen::Json(k_session)},
@@ -139,23 +141,23 @@ public:
         if (end == std::string::npos) {
             return false;
         }
-        const auto auth = qwen::parse(std::string_view(bytes).substr(0, end));
-        const auto frame = qwen::parse(std::string_view(bytes).substr(end + 1));
-        if (!auth || !frame || qwen::text(*auth, "token") != std::string(64, 'd') ||
-            qwen::text(*frame, "toSessionId") != k_session || frame->find("fromMode") ||
-            qwen::text(*frame, "fromName") != "Logonomic mailbox" ||
-            qwen::text(qwen::member(*frame, "message"), "content") != "/shell @file\nMailbox ready")
+        const auto auth = json_util::parse(std::string_view(bytes).substr(0, end));
+        const auto frame = json_util::parse(std::string_view(bytes).substr(end + 1));
+        if (!auth || !frame || json_util::text(*auth, "token") != std::string(64, 'd') ||
+            json_util::text(*frame, "toSessionId") != k_session || frame->find("fromMode") ||
+            json_util::text(*frame, "fromName") != "Logonomic mailbox" ||
+            json_util::text(json_util::member(*frame, "message"), "content") != "/shell @file\nMailbox ready")
         {
             return false;
         }
-        const auto reply_path = qwen::text(*frame, "from");
-        const auto token = wrong_auth ? "incorrect" : qwen::text(*frame, "replyToken");
-        const auto reply_auth = qwen::object({
+        const auto reply_path = json_util::text(*frame, "from");
+        const auto token = wrong_auth ? "incorrect" : json_util::text(*frame, "replyToken");
+        const auto reply_auth = json_util::object({
             {"msgV", qwen::Json(1)}, {"type", qwen::Json("auth")}, {"token", qwen::Json(token)}});
-        const auto receipt = qwen::object({
+        const auto receipt = json_util::object({
             {"msgV", qwen::Json(1)}, {"type", qwen::Json("control")},
             {"action", qwen::Json("delivery_status")}, {"status", qwen::Json(status)},
-            {"origMsgId", qwen::member(*frame, "msgId")}, {"from", qwen::Json(m_socket_path)}});
+            {"origMsgId", json_util::member(*frame, "msgId")}, {"from", qwen::Json(m_socket_path)}});
         const auto reply = addon::serialize_json(reply_auth) + "\n" + addon::serialize_json(receipt) + "\n";
         const int response = socket(AF_UNIX, SOCK_STREAM, 0);
         sockaddr_un address{};

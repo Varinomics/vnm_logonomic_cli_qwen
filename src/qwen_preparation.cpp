@@ -19,6 +19,8 @@
 #include <stdexcept>
 #include <utility>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace qwen {
 namespace {
 
@@ -96,7 +98,7 @@ void prepare_launch(addon::Invocation_context& invocation)
     if (request->session_wake) {
         patch.session_wake = prepare_session_wake(context);
         if (patch.session_wake->available) {
-            patch.set.emplace_back(k_wake_binding_environment, text(patch.session_wake->binding, "launch_token"));
+            patch.set.emplace_back(k_wake_binding_environment, json_util::text(patch.session_wake->binding, "launch_token"));
         }
     }
     // The host's bootstrap owns the effective home. This requests a pure
@@ -208,12 +210,12 @@ void prepare_resume(addon::Invocation_context& invocation)
         invocation.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
         return;
     }
-    const auto session = text(request->resume_record, "provider_session_id");
+    const auto session = json_util::text(request->resume_record, "provider_session_id");
     if (!bootstrap_available(request->context.launch_environment, invocation)) {
         return;
     }
     static const std::regex uuid("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
-    if (!exact_keys(request->resume_record, {"provider_session_id"}) || !std::regex_match(session, uuid)) {
+    if (!json_util::exact_keys(request->resume_record, {"provider_session_id"}) || !std::regex_match(session, uuid)) {
         invocation.fail(addon::Result_status::UNAVAILABLE, "resume_selector_unavailable");
         return;
     }
@@ -282,7 +284,7 @@ void prepare_resume(addon::Invocation_context& invocation)
     if (request->context.session_wake) {
         result.patch.session_wake = prepare_session_wake(request->context);
         if (result.patch.session_wake->available) {
-            result.patch.set.emplace_back(k_wake_binding_environment, text(result.patch.session_wake->binding, "launch_token"));
+            result.patch.set.emplace_back(k_wake_binding_environment, json_util::text(result.patch.session_wake->binding, "launch_token"));
         }
     }
     result.acknowledgment.record_digest_hex = addon::resume_record_digest_hex(request->resume_record);

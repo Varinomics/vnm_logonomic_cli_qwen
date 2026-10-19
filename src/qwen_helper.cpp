@@ -11,15 +11,17 @@
 #include <thread>
 #include <utility>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace addon = logonomic::cli_addon;
 
 namespace {
 
 bool changed_files_requested(const qwen::Json& input)
 {
-    auto prompt = qwen::text(input, "submitted_prompt");
+    auto prompt = json_util::text(input, "submitted_prompt");
     if (prompt.empty()) {
-        prompt = qwen::text(input, "prompt");
+        prompt = json_util::text(input, "prompt");
     }
     prompt = qwen::lower(std::move(prompt));
     bool presentation = false;
@@ -64,7 +66,7 @@ int main()
     if (!input || !input->is_object()) {
         return 1;
     }
-    const auto event = qwen::text(*input, "hook_event_name");
+    const auto event = json_util::text(*input, "hook_event_name");
     if (event != "SessionStart" && event != "SessionEnd" && event != "UserPromptSubmit" &&
         event != "Stop" && event != "StopFailure" && event != "Notification")
     {
@@ -74,7 +76,7 @@ int main()
     addon::Helper_client client(*environment, [&] { return std::chrono::steady_clock::now() >= deadline; });
     auto body = qwen::Json::object();
     for (const auto* key : {"session_id", "prompt_id", "agent_id", "source", "reason", "notification_type"}) {
-        const auto value = qwen::text(*input, key);
+        const auto value = json_util::text(*input, key);
         if (!value.empty()) {
             body.set(key, qwen::Json(value));
         }
@@ -90,7 +92,7 @@ int main()
     if (result.committed) {
         client.acknowledge_provider_event(delivery);
     }
-    if ((event == "SessionStart" || event == "UserPromptSubmit") && qwen::text(*input, "agent_id").empty()) {
+    if ((event == "SessionStart" || event == "UserPromptSubmit") && json_util::text(*input, "agent_id").empty()) {
         const bool changed_files = event == "UserPromptSubmit" && changed_files_requested(*input);
         auto instruction = client.request_title_instruction("qwen", event, changed_files, addon::Model_context_delivery{});
         if (!instruction.completed && std::chrono::steady_clock::now() < deadline) {
@@ -98,7 +100,7 @@ int main()
             instruction = client.request_title_instruction("qwen", event, changed_files, addon::Model_context_delivery{});
         }
         if (instruction.completed && instruction.accepted && !instruction.instruction.empty()) {
-            const auto output = qwen::object({{"hookSpecificOutput", qwen::object({
+            const auto output = json_util::object({{"hookSpecificOutput", json_util::object({
                 {"hookEventName", qwen::Json(event)}, {"additionalContext", qwen::Json(instruction.instruction)}})}});
             const auto serialized = addon::serialize_json_canonical(output);
             std::fwrite(serialized.data(), 1, serialized.size(), stdout);

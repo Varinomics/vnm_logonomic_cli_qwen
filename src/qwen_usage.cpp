@@ -30,6 +30,8 @@
 #include <unistd.h>
 #endif
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace qwen {
 namespace {
 
@@ -134,7 +136,7 @@ bool same_source(const Source_fingerprint& left, const Source_fingerprint& right
 
 Json encode_source(const std::string& path, const Source_fingerprint& fingerprint)
 {
-    return object({
+    return json_util::object({
         {"path",     Json(path)},
         {"bytes",    Json(fingerprint.bytes)},
         {"modified", Json(fingerprint.modified)},
@@ -275,7 +277,7 @@ bool read_objects(const fs::path& path, Budget& budget, addon::Invocation_contex
         check_cancel(context);
         budget.entry();
         if (line.find_first_not_of(" \t\r") == std::string::npos) continue;
-        if (const auto row = parse(line)) {
+        if (const auto row = json_util::parse(line)) {
             if (row->is_object()) consume(*row);
             else {
                 budget.incomplete = true;
@@ -304,7 +306,7 @@ bool read_objects(const fs::path& path, Budget& budget, addon::Invocation_contex
                 if (depth++ == 0) start = index;
             }
             else if (byte == '}' && depth != 0 && --depth == 0) {
-                if (const auto row = parse(std::string_view(line).substr(start, index - start + 1)); row && row->is_object()) consume(*row);
+                if (const auto row = json_util::parse(std::string_view(line).substr(start, index - start + 1)); row && row->is_object()) consume(*row);
             }
         }
     }
@@ -349,23 +351,23 @@ void finish(Session& session)
 
 void append_summary(const Json& row, std::map<std::string, Session>& sessions, const fs::path& source)
 {
-    if (integer(member(row, "version")) != 1) return;
-    const auto id = text(row, "sessionId");
-    const auto timestamp = integer(member(row, "timestamp"));
-    const auto& models = member(row, "models");
+    if (integer(json_util::member(row, "version")) != 1) return;
+    const auto id = json_util::text(row, "sessionId");
+    const auto timestamp = integer(json_util::member(row, "timestamp"));
+    const auto& models = json_util::member(row, "models");
     if (!timestamp || !models.is_object()) throw Usage_error("usage_record_invalid");
     Session session;
-    configure(session, id, date(*timestamp), text(row, "project"), path_string(source), false);
+    configure(session, id, date(*timestamp), json_util::text(row, "project"), path_string(source), false);
     for (const auto& entry : models.as_object()) {
-        const auto total = integer(member(entry.value, "totalTokens"));
+        const auto total = integer(json_util::member(entry.value, "totalTokens"));
         if (!total) throw Usage_error("usage_record_invalid");
         add(session.record.total_tokens, *total);
-        const auto requests = integer(member(entry.value, "requests"));
+        const auto requests = integer(json_util::member(entry.value, "requests"));
         if (requests) add(session.units, *requests);
         else session.denominator_known = false;
         const std::array names{"inputTokens", "outputTokens", "cachedTokens"};
         for (std::size_t index = 0; index < names.size(); ++index) {
-            if (const auto value = integer(member(entry.value, names[index]))) {
+            if (const auto value = integer(json_util::member(entry.value, names[index]))) {
                 add(session.values[index], *value);
                 if (requests) add(session.covered[index], *requests);
             }
@@ -411,56 +413,56 @@ bool append_transcript(
     bool complete = read_objects(file, budget, context, [&](const Json& row) {
         if (current.metadata.record_id.empty()) {
             Session session;
-            configure(session, text(row, "sessionId"), transcript_date(text(row, "timestamp")),
-                text(row, "cwd"), path_string(file), true);
+            configure(session, json_util::text(row, "sessionId"), transcript_date(json_util::text(row, "timestamp")),
+                json_util::text(row, "cwd"), path_string(file), true);
             finish(session);
             current.metadata = std::move(session.record);
             const auto size = transcript_core_bytes(current.metadata.record_id, current);
             staged_bytes += size;
             reserve_original(budget, evidence, size, &current);
         }
-        if ("qwen:" + text(row, "sessionId") != current.metadata.record_id) {
+        if ("qwen:" + json_util::text(row, "sessionId") != current.metadata.record_id) {
             throw Usage_error("usage_session_conflict");
         }
-        current.metadata.completed_date = transcript_date(text(row, "timestamp"));
-        const auto& origin = member(row, "forkedFrom");
+        current.metadata.completed_date = transcript_date(json_util::text(row, "timestamp"));
+        const auto& origin = json_util::member(row, "forkedFrom");
         if (!origin.is_null()) {
             current.forked = true;
-            if (!bounded_string(member(origin, "sessionId"), 2048) ||
-                !bounded_string(member(origin, "messageUuid"), 2048) ||
-                text(origin, "messageUuid") != text(row, "uuid"))
+            if (!json_util::bounded_string(json_util::member(origin, "sessionId"), 2048) ||
+                !json_util::bounded_string(json_util::member(origin, "messageUuid"), 2048) ||
+                json_util::text(origin, "messageUuid") != json_util::text(row, "uuid"))
             {
                 throw Usage_error("usage_fork_provenance_invalid");
             }
         }
-        if (text(row, "type") != "system" || text(row, "subtype") != "ui_telemetry") {
+        if (json_util::text(row, "type") != "system" || json_util::text(row, "subtype") != "ui_telemetry") {
             return;
         }
-        const auto& payload = member(member(row, "systemPayload"), "uiEvent");
-        const auto type = text(payload, "event.name");
+        const auto& payload = json_util::member(json_util::member(row, "systemPayload"), "uiEvent");
+        const auto type = json_util::text(payload, "event.name");
         if (type != "qwen-code.api_response" && type != "qwen-code.api_error") {
             return;
         }
-        if (!bounded_string(member(row, "uuid"), 2048) ||
-            !bounded_string(member(payload, "model"), 4096))
+        if (!json_util::bounded_string(json_util::member(row, "uuid"), 2048) ||
+            !json_util::bounded_string(json_util::member(payload, "model"), 4096))
         {
             throw Usage_error("usage_record_invalid");
         }
         Event event;
-        event.model          = text(payload, "model");
+        event.model          = json_util::text(payload, "model");
         event.error          = type == "qwen-code.api_error";
-        event.copied_from     = origin.is_null() ? std::string{} : "qwen:" + text(origin, "sessionId");
+        event.copied_from     = origin.is_null() ? std::string{} : "qwen:" + json_util::text(origin, "sessionId");
         event.completed_date = current.metadata.completed_date;
-        event.instant        = text(row, "timestamp");
+        event.instant        = json_util::text(row, "timestamp");
         if (!event.error) {
             const std::array names{
                 "input_token_count", "output_token_count", "cached_content_token_count",
                 "thoughts_token_count", "total_token_count"};
             for (std::size_t index = 0; index < names.size(); ++index) {
-                event.values[index] = integer(member(payload, names[index]));
+                event.values[index] = integer(json_util::member(payload, names[index]));
             }
         }
-        const auto uuid = text(row, "uuid");
+        const auto uuid = json_util::text(row, "uuid");
         if (!current.events.contains(uuid)) {
             const auto size = addon::serialize_json(encode_event(current.metadata.record_id, uuid, event)).size() + 1;
             staged_bytes += size;
@@ -578,21 +580,21 @@ bool collect_summaries(
     if (fs::exists(history)) {
         bool understood = true;
         const bool framed = read_objects(history, budget, context, [&](const Json& row) {
-            if (integer(member(row, "version")) != 1) {
+            if (integer(json_util::member(row, "version")) != 1) {
                 understood = false;
                 budget.incomplete = true;
                 return;
             }
-            const auto previous = sessions.find(text(row, "sessionId"));
+            const auto previous = sessions.find(json_util::text(row, "sessionId"));
             if (previous != sessions.end()) {
-                const auto size = addon::serialize_json(object({{"summary",
+                const auto size = addon::serialize_json(json_util::object({{"summary",
                     addon::encode_usage_record(previous->second.record, 2)}})).size() + 1;
                 budget.core_resident_bytes -= size;
                 staged_summary_bytes -= size;
             }
             append_summary(row, sessions, history);
-            const auto& record = sessions.at(text(row, "sessionId")).record;
-            const auto size = addon::serialize_json(object({{"summary",
+            const auto& record = sessions.at(json_util::text(row, "sessionId")).record;
+            const auto size = addon::serialize_json(json_util::object({{"summary",
                 addon::encode_usage_record(record, 2)}})).size() + 1;
             staged_summary_bytes += size;
             reserve_original(budget, evidence, size);
@@ -617,7 +619,7 @@ bool collect_summaries(
         const auto key = session.record.record_id;
         const auto previous = evidence.summaries.find(key);
         const auto previous_size = previous == evidence.summaries.end() ? 0 :
-            addon::serialize_json(object({{"summary", addon::encode_usage_record(previous->second, 2)}})).size() + 1;
+            addon::serialize_json(json_util::object({{"summary", addon::encode_usage_record(previous->second, 2)}})).size() + 1;
         if (summaries_complete) {
             evidence.summaries.insert_or_assign(key, std::move(session.record));
         }
@@ -632,7 +634,7 @@ bool collect_summaries(
         if (const auto accepted = evidence.summaries.find(key); accepted != evidence.summaries.end()) {
             budget.core_resident_bytes -= previous_size;
             reserve_original(budget, evidence,
-                addon::serialize_json(object({{"summary", addon::encode_usage_record(accepted->second, 2)}})).size() + 1);
+                addon::serialize_json(json_util::object({{"summary", addon::encode_usage_record(accepted->second, 2)}})).size() + 1);
         }
     }
     return summaries_complete && retained_complete;
@@ -1082,7 +1084,7 @@ void inspect_storage(const fs::path& directory)
 
 std::string cache_owner(const addon::Usage_scan_request& request, const fs::path& home)
 {
-    return addon::serialize_json_canonical(object({
+    return addon::serialize_json_canonical(json_util::object({
         {"account", Json(request.context.account_context ? request.context.account_context->adapter_account_key : std::string{})},
         {"profile", Json(account_key(home))}}));
 }
@@ -1125,7 +1127,7 @@ Json encode_event(std::string_view session, std::string_view uuid, const Event& 
     for (const auto& value : event.values) {
         values.emplace_back(value ? Json(*value) : Json{});
     }
-    return object({
+    return json_util::object({
         {"session", Json(std::string(session))}, {"uuid", Json(std::string(uuid))},
         {"model", Json(event.model)}, {"copied_from", Json(event.copied_from)},
         {"completed_date", Json(event.completed_date)},
@@ -1137,7 +1139,7 @@ Json event_temporal(std::string_view session, std::string_view uuid, const Event
     if (event.opaque_temporal) {
         return *event.opaque_temporal;
     }
-    return object({{"version", Json(std::int64_t{1})},
+    return json_util::object({{"version", Json(std::int64_t{1})},
         {"accounting_sha256", Json(addon::to_hex(addon::Sha256::digest(
             addon::serialize_json_canonical(encode_event(session, uuid, event)))))},
         {"instant", event.instant_conflict ? Json{} : Json(event.instant)}});
@@ -1151,7 +1153,7 @@ bool has_event_temporal(const Event& event)
 void read_event_temporal(const Json& carrier, std::string_view session,
     std::string_view uuid, Event& event)
 {
-    const auto version = integer(member(carrier, "version"));
+    const auto version = integer(json_util::member(carrier, "version"));
     if (!carrier.is_object() || !version || *version == 0) {
         return;
     }
@@ -1159,17 +1161,17 @@ void read_event_temporal(const Json& carrier, std::string_view session,
         event.opaque_temporal = carrier;
         return;
     }
-    if (!exact_keys(carrier, {"version", "accounting_sha256", "instant"}) ||
-        text(carrier, "accounting_sha256") != addon::to_hex(addon::Sha256::digest(
+    if (!json_util::exact_keys(carrier, {"version", "accounting_sha256", "instant"}) ||
+        json_util::text(carrier, "accounting_sha256") != addon::to_hex(addon::Sha256::digest(
             addon::serialize_json_canonical(encode_event(session, uuid, event)))))
     {
         return;
     }
-    if (member(carrier, "instant").is_null()) {
+    if (json_util::member(carrier, "instant").is_null()) {
         event.instant_conflict = true;
         return;
     }
-    const auto instant = text(carrier, "instant");
+    const auto instant = json_util::text(carrier, "instant");
     try {
         (void)transcript_milliseconds(instant);
         event.instant = instant;
@@ -1184,10 +1186,10 @@ void visit_evidence(const Evidence& evidence, Consumer consume, bool optional = 
 {
     for (const auto& [id, summary] : evidence.summaries) {
         (void)id;
-        consume(object({{"summary", addon::encode_usage_record(summary, 2)}}));
+        consume(json_util::object({{"summary", addon::encode_usage_record(summary, 2)}}));
     }
     for (const auto& [id, transcript] : evidence.transcripts) {
-        consume(object({
+        consume(json_util::object({
             {"transcript", addon::encode_usage_record(transcript.metadata, 2)},
             {"forked", Json(transcript.forked)}, {"published", Json(transcript.published)}}));
         for (const auto& [uuid, event] : transcript.events) {
@@ -1202,7 +1204,7 @@ void visit_evidence(const Evidence& evidence, Consumer consume, bool optional = 
 
 std::uint64_t transcript_core_bytes(std::string_view id, const Transcript& transcript)
 {
-    auto bytes = addon::serialize_json(object({
+    auto bytes = addon::serialize_json(json_util::object({
         {"transcript", addon::encode_usage_record(transcript.metadata, 2)},
         {"forked", Json(transcript.forked)}, {"published", Json(transcript.published)}})).size() + 1;
     for (const auto& [uuid, event] : transcript.events) {
@@ -1420,7 +1422,7 @@ std::optional<Json> isolated_cache_event(std::string_view line)
         const auto begin = offset;
         const auto key_end = quoted_json_end(line, offset);
         if (!key_end) return std::nullopt;
-        const auto key = parse(line.substr(offset, *key_end - offset));
+        const auto key = json_util::parse(line.substr(offset, *key_end - offset));
         if (!key || !key->is_string() || !names.insert(key->as_string()).second) return std::nullopt;
         offset = *key_end;
         skip_json_space(line, offset);
@@ -1449,7 +1451,7 @@ std::optional<Json> isolated_cache_event(std::string_view line)
     skip_json_space(line, offset);
     if (offset != line.size() || !carrier) return std::nullopt;
     original += '}';
-    auto row = parse(original);
+    auto row = json_util::parse(original);
     if (!row || row->find("summary") || row->find("transcript") || row->find("end")) return std::nullopt;
     addon::Json_parse_limits optional_limits;
     optional_limits.max_string_bytes = k_max_line_bytes;
@@ -1472,8 +1474,8 @@ std::optional<Evidence> read_cache(const fs::path& path, std::string_view owner,
     std::string line;
     addon::Sha256 digest;
     if (!read_line(input, &line, budget, context)) throw Usage_error("usage_cache_invalid");
-    const auto header = parse(line);
-    if (!header || !exact_keys(*header, {"version", "owner"}) || integer(member(*header, "version")) != 1 || text(*header, "owner") != owner)
+    const auto header = json_util::parse(line);
+    if (!header || !json_util::exact_keys(*header, {"version", "owner"}) || integer(json_util::member(*header, "version")) != 1 || json_util::text(*header, "owner") != owner)
         throw Usage_error("usage_cache_owner_mismatch");
     digest.update(line); digest.update("\n");
     Evidence evidence;
@@ -1481,14 +1483,14 @@ std::optional<Evidence> read_cache(const fs::path& path, std::string_view owner,
     std::uint64_t events = 0;
     while (read_line(input, &line, budget, context)) {
         check_cancel(context);
-        auto row = parse(line);
+        auto row = json_util::parse(line);
         if (!row) {
             row = isolated_cache_event(line);
         }
         if (!row) throw Usage_error("usage_cache_invalid");
         if (row->find("end")) {
-            if (!exact_keys(*row, {"end", "count", "sha256"}) || integer(member(*row, "end")) != 1 ||
-                integer(member(*row, "count")) != count || text(*row, "sha256") != addon::to_hex(digest.finish()) ||
+            if (!json_util::exact_keys(*row, {"end", "count", "sha256"}) || integer(json_util::member(*row, "end")) != 1 ||
+                integer(json_util::member(*row, "count")) != count || json_util::text(*row, "sha256") != addon::to_hex(digest.finish()) ||
                 input.peek() != std::char_traits<char>::eof()) throw Usage_error("usage_cache_invalid");
             return evidence;
         }
@@ -1496,7 +1498,7 @@ std::optional<Evidence> read_cache(const fs::path& path, std::string_view owner,
         addon::Contract_failure failure;
         if (row->find("summary") || row->find("transcript")) {
             const bool summary = row->find("summary") != nullptr;
-            auto record = addon::decode_usage_record(member(*row, summary ? "summary" : "transcript"), &failure, 2);
+            auto record = addon::decode_usage_record(json_util::member(*row, summary ? "summary" : "transcript"), &failure, 2);
             if (!record || !record->record_id.starts_with("qwen:") ||
                 record->session_key != record->record_id)
             {
@@ -1504,7 +1506,7 @@ std::optional<Evidence> read_cache(const fs::path& path, std::string_view owner,
             }
             const auto id = record->record_id;
             if (summary) {
-                if (!exact_keys(*row, {"summary"}) ||
+                if (!json_util::exact_keys(*row, {"summary"}) ||
                     !evidence.summaries.emplace(id, std::move(*record)).second ||
                     evidence.summaries.size() > budget.limits.records)
                 {
@@ -1512,12 +1514,12 @@ std::optional<Evidence> read_cache(const fs::path& path, std::string_view owner,
                 }
             }
             else {
-                if (!exact_keys(*row, {"transcript", "forked", "published"}) ||
-                    !member(*row, "forked").is_boolean() || !member(*row, "published").is_boolean() ||
+                if (!json_util::exact_keys(*row, {"transcript", "forked", "published"}) ||
+                    !json_util::member(*row, "forked").is_boolean() || !json_util::member(*row, "published").is_boolean() ||
                     record->total_tokens != 0 || record->model ||
                     !evidence.transcripts.emplace(id, Transcript{
-                        std::move(*record), {}, member(*row, "forked").as_boolean(),
-                        member(*row, "published").as_boolean()}).second ||
+                        std::move(*record), {}, json_util::member(*row, "forked").as_boolean(),
+                        json_util::member(*row, "published").as_boolean()}).second ||
                     evidence.transcripts.size() > budget.limits.records)
                 {
                     throw Usage_error("usage_cache_invalid");
@@ -1525,24 +1527,24 @@ std::optional<Evidence> read_cache(const fs::path& path, std::string_view owner,
             }
         }
         else {
-            const auto carrier = row->find("temporal") ? std::optional(member(*row, "temporal")) : std::nullopt;
+            const auto carrier = row->find("temporal") ? std::optional(json_util::member(*row, "temporal")) : std::nullopt;
             row->erase("temporal");
-            const auto transcript = evidence.transcripts.find(text(*row, "session"));
-            const auto& values = member(*row, "values");
-            if (!exact_keys(*row, {"session", "uuid", "model", "copied_from", "completed_date", "error", "values"}) ||
-                transcript == evidence.transcripts.end() || !bounded_string(member(*row, "uuid"), 2048) ||
-                !bounded_string(member(*row, "model"), 4096) ||
-                !bounded_string(member(*row, "copied_from"), 2053, true) ||
-                !member(*row, "error").is_boolean() || !values.is_array() || values.as_array().size() != 5 ||
+            const auto transcript = evidence.transcripts.find(json_util::text(*row, "session"));
+            const auto& values = json_util::member(*row, "values");
+            if (!json_util::exact_keys(*row, {"session", "uuid", "model", "copied_from", "completed_date", "error", "values"}) ||
+                transcript == evidence.transcripts.end() || !json_util::bounded_string(json_util::member(*row, "uuid"), 2048) ||
+                !json_util::bounded_string(json_util::member(*row, "model"), 4096) ||
+                !json_util::bounded_string(json_util::member(*row, "copied_from"), 2053, true) ||
+                !json_util::member(*row, "error").is_boolean() || !values.is_array() || values.as_array().size() != 5 ||
                 ++events > budget.limits.source_entries)
             {
                 throw Usage_error("usage_cache_invalid");
             }
             Event event;
-            event.model          = text(*row, "model");
-            event.copied_from     = text(*row, "copied_from");
-            event.completed_date = text(*row, "completed_date");
-            event.error          = member(*row, "error").as_boolean();
+            event.model          = json_util::text(*row, "model");
+            event.copied_from     = json_util::text(*row, "copied_from");
+            event.completed_date = json_util::text(*row, "completed_date");
+            event.error          = json_util::member(*row, "error").as_boolean();
             auto date_record = transcript->second.metadata;
             date_record.completed_date = event.completed_date;
             if (!addon::decode_usage_record(addon::encode_usage_record(date_record, 2), &failure, 2) ||
@@ -1559,9 +1561,9 @@ std::optional<Evidence> read_cache(const fs::path& path, std::string_view owner,
                 }
             }
             if (carrier) {
-                read_event_temporal(*carrier, text(*row, "session"), text(*row, "uuid"), event);
+                read_event_temporal(*carrier, json_util::text(*row, "session"), json_util::text(*row, "uuid"), event);
             }
-            if (!transcript->second.events.emplace(text(*row, "uuid"), std::move(event)).second) {
+            if (!transcript->second.events.emplace(json_util::text(*row, "uuid"), std::move(event)).second) {
                 throw Usage_error("usage_cache_invalid");
             }
         }
@@ -1585,26 +1587,26 @@ Source_index read_source_index(
         if (!read_line(input, &line, budget, context)) {
             return {};
         }
-        const auto header = parse(line);
-        if (!header || !exact_keys(*header, {"version"}) || integer(member(*header, "version")) != 1) {
+        const auto header = json_util::parse(line);
+        if (!header || !json_util::exact_keys(*header, {"version"}) || integer(json_util::member(*header, "version")) != 1) {
             return {};
         }
         while (read_line(input, &line, budget, context)) {
             check_cancel(context);
             budget.entry();
-            const auto row = parse(line);
-            if (!row || !exact_keys(*row, {"path", "bytes", "modified", "session"})) {
+            const auto row = json_util::parse(line);
+            if (!row || !json_util::exact_keys(*row, {"path", "bytes", "modified", "session"})) {
                 return {};
             }
-            const auto bytes = integer(member(*row, "bytes"));
-            if (!bytes || !bounded_string(member(*row, "path"), 32768) ||
-                !bounded_string(member(*row, "modified"), 32) ||
-                !bounded_string(member(*row, "session"), 2053, true))
+            const auto bytes = integer(json_util::member(*row, "bytes"));
+            if (!bytes || !json_util::bounded_string(json_util::member(*row, "path"), 32768) ||
+                !json_util::bounded_string(json_util::member(*row, "modified"), 32) ||
+                !json_util::bounded_string(json_util::member(*row, "session"), 2053, true))
             {
                 return {};
             }
-            const auto source = text(*row, "path");
-            const auto session = text(*row, "session");
+            const auto source = json_util::text(*row, "path");
+            const auto session = json_util::text(*row, "session");
             if (!session.empty()) {
                 const auto transcript = evidence.transcripts.find(session);
                 if (transcript == evidence.transcripts.end() || transcript->second.metadata.source_path != source) {
@@ -1614,7 +1616,7 @@ Source_index read_source_index(
             if (index.files.contains(source)) {
                 return {};
             }
-            remember_source(index, source, Source_fingerprint{*bytes, text(*row, "modified"), session});
+            remember_source(index, source, Source_fingerprint{*bytes, json_util::text(*row, "modified"), session});
         }
     }
     catch (const Usage_error&) {
@@ -1654,7 +1656,7 @@ void replace_cache(const fs::path& directory, std::string_view owner,
     regular_or_absent(accepted);
     // Account for header, footer and line delimiters before creating/truncating
     // the replacement. Both the accepted and pending files have this same cap.
-    const auto header = addon::serialize_json(object({{"version", Json(std::int64_t{1})}, {"owner", Json(std::string(owner))}}));
+    const auto header = addon::serialize_json(json_util::object({{"version", Json(std::int64_t{1})}, {"owner", Json(std::string(owner))}}));
     std::uint64_t bytes = header.size() + 1 + 256; // bounded footer including count/digest
     std::uint64_t count = 0;
     visit_evidence(evidence, [&](const Json& row) {
@@ -1682,7 +1684,7 @@ void replace_cache(const fs::path& directory, std::string_view owner,
             check_cancel(context);
             write(addon::serialize_json(row));
         }, context.request().capability.version == 3);
-        output << addon::serialize_json(object({{"end", Json(std::int64_t{1})},
+        output << addon::serialize_json(json_util::object({{"end", Json(std::int64_t{1})},
             {"count", Json(count)}, {"sha256", Json(addon::to_hex(digest.finish()))}})) << '\n';
         output.flush();
         if (!output) throw Usage_error("usage_storage_write_failed");

@@ -15,6 +15,8 @@
 #include <stdexcept>
 #include <string>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace {
 
 namespace addon = logonomic::cli_addon;
@@ -41,17 +43,17 @@ bool settings_contract()
     const auto parsed = qwen::parse_settings(configured);
     bool ok = check(configured.find("// Keep my chosen provider") != std::string::npos,
         "unrelated settings comments survive");
-    ok &= check(qwen::text(qwen::member(qwen::member(parsed, "security"), "auth"), "selectedType") == "openai",
+    ok &= check(json_util::text(json_util::member(json_util::member(parsed, "security"), "auth"), "selectedType") == "openai",
         "selected native authentication survives");
-    const auto& stop = qwen::member(qwen::member(parsed, "hooks"), "Stop");
+    const auto& stop = json_util::member(json_util::member(parsed, "hooks"), "Stop");
     ok &= check(stop.is_array() && stop.as_array().size() == 2,
         "existing Stop command and managed command coexist");
     ok &= check(qwen::updated_config(configured) == configured, "hook installation is idempotent");
     ok &= check(configured.find("/* before */") != std::string::npos &&
         configured.find("/* after */") != std::string::npos, "hook-array comments survive");
     auto modified = parsed;
-    auto hooks = qwen::member(modified, "hooks");
-    auto modified_stop = qwen::member(hooks, "Stop");
+    auto hooks = json_util::member(modified, "hooks");
+    auto modified_stop = json_util::member(hooks, "Stop");
     modified_stop.as_array().back().set("matcher", qwen::Json("custom"));
     hooks.set("Stop", modified_stop);
     modified.set("hooks", hooks);
@@ -79,7 +81,7 @@ bool lifecycle_contract()
     // hookEventHandler creates these fields directly from Config/prompt context.
     addon::Classify_event_request request;
     request.event.name = "SessionStart";
-    request.event.body = qwen::object({{"session_id", qwen::Json("12345678-1234-4234-8234-123456789abc")},
+    request.event.body = json_util::object({{"session_id", qwen::Json("12345678-1234-4234-8234-123456789abc")},
         {"event_id", qwen::Json("abcdef0123456789abcdef0123456789")}, {"source", qwen::Json("startup")}});
     auto result = qwen::classify_event(request);
     bool ok = check(result.classification == addon::Classification::TRANSITION && result.observations.size() == 1,
@@ -181,7 +183,7 @@ bool declared_profile_admits_every_shape(const std::filesystem::path& package)
             const char* shape)
         {
             request.base.event.name = name;
-            request.base.event.body = qwen::object({
+            request.base.event.body = json_util::object({
                 {"session_id", qwen::Json("native-session")}, {"event_id", qwen::Json("helper-delivery")},
                 {"prompt_id", qwen::Json("native-turn")}, {member, qwen::Json(value)}});
             const auto result = qwen::classify_attention(request);
@@ -227,7 +229,7 @@ bool attention_contract(const std::filesystem::path& package, const std::filesys
     request.base.ledger.current_transition = addon::Ledger_transition{
         addon::Transition_kind::START, "native-session", std::string(32, 'b')};
     request.base.event.name = "Notification";
-    request.base.event.body = qwen::object({
+    request.base.event.body = json_util::object({
         {"session_id", qwen::Json("native-session")}, {"event_id", qwen::Json("helper-delivery")},
         {"prompt_id", qwen::Json("native-turn")}, {"message", qwen::Json("private-notification-canary?")}});
     bool ok = true;

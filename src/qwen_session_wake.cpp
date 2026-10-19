@@ -10,6 +10,8 @@
 #include <optional>
 #include <stdexcept>
 
+namespace json_util = logonomic::cli_addon::json;
+
 namespace qwen {
 namespace {
 
@@ -18,19 +20,19 @@ namespace addon = logonomic::cli_addon;
 #ifdef __linux__
 std::optional<Peer_target> bound_peer(const addon::Session_wake_target& target)
 {
-    if (!exact_keys(target.binding, {"profile_path", "account_key", "launch_token"}) ||
+    if (!json_util::exact_keys(target.binding, {"profile_path", "account_key", "launch_token"}) ||
         !target.launch_environment.bootstrap ||
         !addon::path_from_utf8(target.launch_environment.bootstrap->resolved_home).is_absolute())
     {
         return std::nullopt;
     }
     const auto profile = profile_from_environment(target.launch_environment);
-    if (path_string(profile.home) != text(target.binding, "profile_path") ||
-        account_key(profile.home) != text(target.binding, "account_key"))
+    if (path_string(profile.home) != json_util::text(target.binding, "profile_path") ||
+        account_key(profile.home) != json_util::text(target.binding, "account_key"))
     {
         return std::nullopt;
     }
-    return find_peer(profile.home, target.provider_session_id, text(target.binding, "launch_token"));
+    return find_peer(profile.home, target.provider_session_id, json_util::text(target.binding, "launch_token"));
 }
 #endif
 
@@ -74,7 +76,7 @@ addon::Session_wake_preparation prepare_session_wake(const addon::Session_launch
 {
 #ifdef __linux__
     const auto profile = profile_for_context(context);
-    return {true, object({{"profile_path", Json(path_string(profile.home))},
+    return {true, json_util::object({{"profile_path", Json(path_string(profile.home))},
         {"account_key", Json(account_key(profile.home))}, {"launch_token", Json(addon::random_nonce_hex())}}), {}};
 #else
     (void)context;
