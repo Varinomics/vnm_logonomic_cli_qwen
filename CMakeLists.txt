@@ -155,6 +155,12 @@ add_test(NAME qwen_usage_cache_tests
     COMMAND qwen_usage_cache_tests "${QWEN_PACKAGE_DIRECTORY}")
 set_tests_properties(qwen_usage_cache_tests PROPERTIES TIMEOUT 180 LABELS "usage;cache;packaged-adapter")
 
+add_executable(qwen_continuation_tests tests/qwen_continuation_tests.cpp)
+target_link_libraries(qwen_continuation_tests PRIVATE qwen_provider)
+qwen_target(qwen_continuation_tests)
+add_test(NAME qwen_continuation_tests COMMAND qwen_continuation_tests)
+set_tests_properties(qwen_continuation_tests PROPERTIES TIMEOUT 120 LABELS "addon;protocol;continuation")
+
 add_executable(qwen_acp_causal_tests tests/qwen_acp_causal_tests.cpp)
 target_link_libraries(qwen_acp_causal_tests PRIVATE qwen_provider)
 qwen_target(qwen_acp_causal_tests)
