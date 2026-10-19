@@ -27,28 +27,6 @@ bool equal_name(std::string_view left, std::string_view right)
 #endif
 }
 
-std::vector<std::string> literal_argv(std::string_view script)
-{
-    std::vector<std::string> result;
-    std::string current;
-    bool quoted = false;
-    int quotes = 0;
-    for (const char character : script) {
-        if (character == '"') {
-            if (++quotes == 3) { current += '"'; quotes = 0; }
-            continue;
-        }
-        if (quotes == 1) quoted = !quoted;
-        quotes = 0;
-        if (!quoted && std::isspace(static_cast<unsigned char>(character))) {
-            if (!current.empty()) { result.push_back(current); current.clear(); }
-        }
-        else current += character;
-    }
-    if (!current.empty()) result.push_back(current);
-    return result;
-}
-
 bool is_qwen_invocation(const std::vector<std::string>& argv)
 {
     if (argv.empty()) {
@@ -74,7 +52,7 @@ bool recognize_launcher(std::string_view script)
     if (script.find_first_of(";&|<>$`%\r\n") != std::string_view::npos) {
         return false;
     }
-    const auto argv = literal_argv(script);
+    const auto argv = addon::literal_argv(script);
     return !argv.empty() && base_name(argv.front()) == "qwen";
 }
 
@@ -327,7 +305,7 @@ std::optional<std::vector<std::string>> selected_command(
     {
         return std::nullopt;
     }
-    const auto literal = literal_argv(launcher.script_body);
+    const auto literal = addon::literal_argv(launcher.script_body);
     if (literal.size() != argv.size() ||
         !std::equal(literal.begin() + 1, literal.end(), argv.begin() + 1))
     {

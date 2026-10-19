@@ -74,43 +74,15 @@ logonomic_cli_addon_add_launch_bridge(qwen_launch_bridge)
 qwen_target(qwen_launch_bridge)
 
 logonomic_cli_addon_package_platform(QWEN_PLATFORM)
-logonomic_cli_addon_package_directory(logonomic.cli.qwen QWEN_PACKAGE_DIRECTORY)
 configure_file(package/logonomic-cli-addon.json.in generated/logonomic-cli-addon.json @ONLY)
-logonomic_cli_addon_package_indexer(package_index_command package_index_dependencies)
-file(GLOB_RECURSE package_files CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/package/assets/*"
-    "${CMAKE_CURRENT_SOURCE_DIR}/package/capabilities/*"
-    "${CMAKE_CURRENT_SOURCE_DIR}/package/provenance/*"
-    "${CMAKE_CURRENT_SOURCE_DIR}/package/notices/*")
-# Directory membership is an input too: removing a resource, or adding one
-# with an older timestamp, must rebuild the indexed package. file(GENERATE)
-# changes this file only when membership changes, preserving no-op builds.
-file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt"
-    CONTENT "${package_files}\n")
-add_custom_command(
-    OUTPUT "${QWEN_PACKAGE_DIRECTORY}/package.files.json"
-    COMMAND "${CMAKE_COMMAND}" -E rm -rf "${QWEN_PACKAGE_DIRECTORY}"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory "${QWEN_PACKAGE_DIRECTORY}/adapter" "${QWEN_PACKAGE_DIRECTORY}/helpers"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/package/assets" "${QWEN_PACKAGE_DIRECTORY}/assets"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/package/capabilities" "${QWEN_PACKAGE_DIRECTORY}/capabilities"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/package/provenance" "${QWEN_PACKAGE_DIRECTORY}/provenance"
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/package/notices" "${QWEN_PACKAGE_DIRECTORY}/notices"
-    COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${QWEN_PACKAGE_DIRECTORY}/logonomic-cli-addon.json"
-    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:qwen_adapter>" "${QWEN_PACKAGE_DIRECTORY}/adapter/qwen_adapter${CMAKE_EXECUTABLE_SUFFIX}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:qwen_helper>" "${QWEN_PACKAGE_DIRECTORY}/helpers/qwen_helper${CMAKE_EXECUTABLE_SUFFIX}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:qwen_launch_bridge>" "${QWEN_PACKAGE_DIRECTORY}/helpers/qwen_launch_bridge${CMAKE_EXECUTABLE_SUFFIX}"
-    COMMAND ${package_index_command} "${QWEN_PACKAGE_DIRECTORY}"
+logonomic_cli_addon_add_package(qwen_package logonomic.cli.qwen QWEN_PACKAGE_DIRECTORY
+    ADAPTER qwen_adapter
+    HELPERS qwen_helper qwen_launch_bridge
+    INDEX_ARGUMENTS
         --third-party "assets/qwen_dark.svg" "notices/qwen-LICENSE.txt"
             "provenance/qwen_logo.json"
         --third-party "assets/qwen_light.svg" "notices/qwen-LICENSE.txt"
-            "provenance/qwen_logo.json"
-    DEPENDS qwen_adapter qwen_helper qwen_launch_bridge logonomic_cli_addon_index
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/logonomic-cli-addon.json" "${CMAKE_CURRENT_BINARY_DIR}/package-inputs.txt"
-        ${package_files} ${package_index_dependencies}
-    VERBATIM)
-add_custom_target(qwen_package ALL DEPENDS "${QWEN_PACKAGE_DIRECTORY}/package.files.json")
-logonomic_cli_addon_install_package("${QWEN_PACKAGE_DIRECTORY}" logonomic.cli.qwen TARGET qwen_package)
+            "provenance/qwen_logo.json")
 
 # Everything below is the package's own test suite, which only its standalone
 # build configures; an embedding build stages the package and stops here.
