@@ -1,6 +1,9 @@
 #include "qwen_profile.h"
 #include "qwen_usage.h"
 
+#include <logonomic_cli_addon_test/invocation_context.h>
+#include <logonomic_cli_addon_test/usage_scan.h>
+
 #include <logonomic_cli_addon/environment_bootstrap.h>
 #include <logonomic_cli_addon/host_simulator.h>
 #include <logonomic_cli_addon/ids.h>
@@ -26,6 +29,7 @@ namespace json_util = logonomic::cli_addon::json;
 namespace {
 
 namespace addon = logonomic::cli_addon;
+namespace test = addon::test;
 namespace fs = std::filesystem;
 
 void check(bool condition, const std::string& message)
@@ -35,30 +39,7 @@ void check(bool condition, const std::string& message)
     }
 }
 
-class Cancelled_context final : public addon::Invocation_context
-{
-public:
-    explicit Cancelled_context(const addon::Usage_scan_request& input)
-    {
-        m_request.capability = {"usage-scan", 3};
-        m_request.operation = "scan";
-        m_request.payload = addon::encode_usage_scan_request(input, 3);
-    }
-
-    const addon::Invoke_request& request() const override { return m_request; }
-    bool cancel_requested() const override { return true; }
-    bool wait_for_cancel(int) override { return true; }
-    void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override {}
-    void succeed(addon::Json_value) override { throw std::runtime_error("cancelled scan succeeded"); }
-    void fail(addon::Result_status, std::string reason, std::string) override
-    {
-        throw std::runtime_error(reason);
-    }
-    bool finished() const override { return false; }
-
-private:
-    addon::Invoke_request m_request;
-};
+using Cancelled_context = test::Cancelled_scan_context;
 
 class Workspace
 {
@@ -160,63 +141,6 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     check(acknowledged && acknowledged->status == addon::Host_status::SUCCESS,
         "packaged adapter acknowledges allocated storage");
 
-    const auto outcome_for = [&](const addon::Usage_scan_request& input, std::uint16_t version) {
-        const auto id = active_host->invoke({"usage-scan", version}, "scan",
-            addon::encode_usage_scan_request(input, version), 30000);
-        const auto outcome = active_host->wait_outcome(id, 31000);
-        check(outcome.has_value(), "packaged scan must finish");
-        return *outcome;
-    };
-    const auto page_for = [&](const addon::Usage_scan_request& input, std::uint16_t version) {
-        const auto outcome = outcome_for(input, version);
-        check(outcome.status == addon::Host_status::SUCCESS,
-            "packaged scan failed: " + outcome.reason_code + "; request=" +
-                addon::serialize_json(addon::encode_usage_scan_request(input, version)));
-        const auto page = addon::decode_usage_scan_result(outcome.payload, &failure, version);
-        check(page.has_value(), failure.detail);
-        if (version == 3) {
-            check(page->profile_storage && input.context.profile_storage &&
-                page->profile_storage->version == input.context.profile_storage->version &&
-                page->profile_storage->root == input.context.profile_storage->root,
-                "every usage3 page echoes the exact requested profile storage");
-            check(page->account_context.has_value() == input.context.account_context.has_value(),
-                "usage3 preserves account-context presence without synthesizing it");
-            if (input.context.account_context) {
-                check(addon::encode_account_context(*page->account_context) ==
-                    addon::encode_account_context(*input.context.account_context),
-                    "every usage3 page preserves account version, key and profile exactly");
-            }
-            else {
-                check(!outcome.payload.find("account_context"),
-                    "absent account context is omitted on the wire, not null");
-            }
-        }
-        else {
-            check(!outcome.payload.find("account_context") && !outcome.payload.find("profile_storage"),
-                "legacy usage pages do not acquire usage3 acknowledgments");
-        }
-        return *page;
-    };
-    const auto all_pages = [&](addon::Usage_scan_request input, std::uint16_t version) {
-        auto first = page_for(input, version);
-        auto page = first;
-        while (!page.complete) {
-            input.snapshot_id = page.snapshot_id;
-            input.cursor = page.next_cursor;
-            page = page_for(input, version);
-            check(page.cache_candidate == first.cache_candidate,
-                "candidate descriptor stays identical across pages");
-            first.records.insert(first.records.end(), page.records.begin(), page.records.end());
-        }
-        return first;
-    };
-    const auto total = [](const addon::Usage_scan_page& page) {
-        std::uint64_t sum = 0;
-        for (const auto& record : page.records) {
-            sum += record.total_tokens;
-        }
-        return sum;
-    };
     const auto select = [&](std::string name, std::optional<addon::Usage_cache_reference> accepted) {
         request.snapshot_id.reset();
         request.cursor.reset();
@@ -235,12 +159,13 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
             [] { return false; }, &failure).has_value(), "sealed candidate remains intact: " + failure.detail);
     };
 
-    check(total(all_pages(request, 2)) == 2700, "v2 retains its existing namespace and telemetry");
+    check(test::usage_token_total(test::usage_scan_pages(*active_host, request, 2)) == 2700,
+        "v2 retains its existing namespace and telemetry");
     for (const auto& path : sources) {
         check(fs::remove(path), "remove fixture source");
     }
     select("empty-selection", std::nullopt);
-    const auto empty = all_pages(request, 3);
+    const auto empty = test::usage_scan_pages(*active_host, request, 3);
     check(empty.records.empty() && empty.cache_candidate,
         "absent host selection never bootstraps from mutable provider cache");
     validate(*empty.cache_candidate);
@@ -248,7 +173,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     sources = write_sources(profile, 10);
     select("accepted", std::nullopt);
     const auto first_request = request;
-    const auto first = page_for(request, 3);
+    const auto first = test::usage_scan_page(*active_host, request, 3);
     check(!first.complete && first.records.size() == 256 && first.cache_candidate,
         "packaged first page supplies a sealed bounded candidate");
     validate(*first.cache_candidate);
@@ -256,9 +181,9 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     request.cursor = first.next_cursor;
     auto changed = request;
     changed.mode = "repair";
-    check(outcome_for(changed, 3).status != addon::Host_status::SUCCESS,
+    check(test::usage_scan_outcome(*active_host, changed, 3).status != addon::Host_status::SUCCESS,
         "continuation cannot change the frozen request");
-    const auto last = page_for(request, 3);
+    const auto last = test::usage_scan_page(*active_host, request, 3);
     check(last.complete && last.records.size() == 14 && last.cache_candidate == first.cache_candidate,
         "packaged final page preserves candidate identity");
     for (const auto& record : first.records) {
@@ -299,12 +224,12 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     check(restarted_acknowledged && restarted_acknowledged->status == addon::Host_status::SUCCESS,
         "restarted adapter acknowledges the retained host allocation");
     select("unchanged-restarted", first.cache_candidate);
-    const auto unchanged = all_pages(request, 3);
-    check(total(unchanged) == 2700 && !unchanged.incomplete_historical_coverage,
+    const auto unchanged = test::usage_scan_pages(*active_host, request, 3);
+    check(test::usage_token_total(unchanged) == 2700 && !unchanged.incomplete_historical_coverage,
         "incremental replay reuses unchanged source identities and preserves complete source coverage");
     select("repair-unchanged", unchanged.cache_candidate);
     request.mode = "repair";
-    check(total(all_pages(request, 3)) == 5400,
+    check(test::usage_token_total(test::usage_scan_pages(*active_host, request, 3)) == 5400,
         "full repair rereads native corrections despite unchanged size and timestamp");
 
     const auto original_records_path = addon::usage_cache_io_path(
@@ -322,8 +247,8 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
             [] { return false; }, &failure);
         check(sealed.has_value(), "seal optional-index upgrade fixture: " + failure.detail);
         select("index-upgrade-output-" + std::to_string(version), sealed);
-        const auto upgraded = all_pages(request, 3);
-        check(total(upgraded) == 5400,
+        const auto upgraded = test::usage_scan_pages(*active_host, request, 3);
+        check(test::usage_token_total(upgraded) == 5400,
             "absent or unknown optional index rereads native sources without losing accepted accounting");
     }
 
@@ -333,34 +258,38 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     write(added_source, original_event);
     fs::last_write_time(added_source, original_times.front() - std::chrono::hours(24));
     select("backdated-new", first.cache_candidate);
-    const auto discovered = all_pages(request, 3);
-    check(total(discovered) == 2707, "incremental discovery includes new files older than the previous scan");
+    const auto discovered = test::usage_scan_pages(*active_host, request, 3);
+    check(test::usage_token_total(discovered) == 2707,
+        "incremental discovery includes new files older than the previous scan");
     const auto appended_events = original_event + transcript_row("incremental-new", "second-call", 5);
     write(added_source, appended_events);
     select("appended", discovered.cache_candidate);
-    const auto appended = all_pages(request, 3);
-    check(total(appended) == 2712, "incremental update reconciles appended events exactly once");
+    const auto appended = test::usage_scan_pages(*active_host, request, 3);
+    check(test::usage_token_total(appended) == 2712,
+        "incremental update reconciles appended events exactly once");
     select("appended-unchanged", appended.cache_candidate);
-    check(total(all_pages(request, 3)) == 2712, "unchanged replay does not count the append again");
+    check(test::usage_token_total(test::usage_scan_pages(*active_host, request, 3)) == 2712,
+        "unchanged replay does not count the append again");
     const auto duplicate_source = profile / "projects/repo/chats/duplicate.jsonl";
     write(duplicate_source, original_event);
     select("duplicate-live", appended.cache_candidate);
-    check(outcome_for(request, 3).reason_code == "usage_session_conflict",
+    check(test::usage_scan_outcome(*active_host, request, 3).reason_code == "usage_session_conflict",
         "reused sources still participate in duplicate live session detection");
     check(fs::remove(duplicate_source), "remove duplicate source fixture");
     check(fs::remove(added_source), "remove accepted source fixture");
     select("deleted-incremental", appended.cache_candidate);
-    const auto deleted = all_pages(request, 3);
-    check(total(deleted) == 2712 && deleted.incomplete_historical_coverage,
+    const auto deleted = test::usage_scan_pages(*active_host, request, 3);
+    check(test::usage_token_total(deleted) == 2712 && deleted.incomplete_historical_coverage,
         "incremental update retains accepted events after source deletion");
     select("deleted-repair", deleted.cache_candidate);
     request.mode = "repair";
-    check(total(all_pages(request, 3)) == 2712, "full repair preserves accepted history with deleted sources");
+    check(test::usage_token_total(test::usage_scan_pages(*active_host, request, 3)) == 2712,
+        "full repair preserves accepted history with deleted sources");
 
     write(added_source, original_event + "{\"sessionId\"");
     select("partial-source", first.cache_candidate);
-    const auto partial = all_pages(request, 3);
-    check(total(partial) == 2707 && partial.incomplete_historical_coverage,
+    const auto partial = test::usage_scan_pages(*active_host, request, 3);
+    check(test::usage_token_total(partial) == 2707 && partial.incomplete_historical_coverage,
         "partial source retains its complete observed event");
     const auto partial_index = read_bytes(addon::usage_cache_io_path(
         addon::path_from_utf8(partial.cache_candidate->root) / "source-index"));
@@ -368,7 +297,8 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
         "partial files cannot acquire a reusable complete-source marker");
     write(added_source, appended_events);
     select("partial-completed", partial.cache_candidate);
-    check(total(all_pages(request, 3)) == 2712, "completed append recovers after partial input");
+    check(test::usage_token_total(test::usage_scan_pages(*active_host, request, 3)) == 2712,
+        "completed append recovers after partial input");
     check(fs::remove(added_source), "remove completed partial-source fixture");
 
     select("account-v1", std::nullopt);
@@ -376,7 +306,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     request.context.account_context->profile_path.reset();
     // Version one has no profile locator; acknowledgment support must not
     // bypass the native provider's existing explicit-account admission.
-    const auto version_one = outcome_for(request, 3);
+    const auto version_one = test::usage_scan_outcome(*active_host, request, 3);
     check(version_one.status != addon::Host_status::SUCCESS &&
         version_one.reason_code == "usage_source_unavailable",
         "version-one account without a profile locator retains its explicit refusal");
@@ -385,16 +315,17 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
 
     select("account-absent", std::nullopt);
     request.context.account_context.reset();
-    const auto account_absent = all_pages(request, 3);
-    check(account_absent.records.size() == 270 && total(account_absent) == 2700,
+    const auto account_absent = test::usage_scan_pages(*active_host, request, 3);
+    check(account_absent.records.size() == 270 && test::usage_token_total(account_absent) == 2700,
         "environment-selected profile keeps account context absent on every page");
     request.context = first_request.context;
 
     sources = write_sources(profile, 1);
     select("unaccepted", first.cache_candidate);
     request.mode = "repair";
-    const auto lower = all_pages(request, 3);
-    check(total(lower) == 270 && lower.cache_candidate, "lower native observation is a separate candidate");
+    const auto lower = test::usage_scan_pages(*active_host, request, 3);
+    check(test::usage_token_total(lower) == 270 && lower.cache_candidate,
+        "lower native observation is a separate candidate");
     validate(*first.cache_candidate);
     for (const auto& path : sources) {
         check(fs::remove(path), "remove refreshed fixture source");
@@ -402,8 +333,9 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
 
     // The host rejects the lower partial aggregate and continues selecting the coherent original cache.
     select("recovered", first.cache_candidate);
-    const auto recovered = all_pages(request, 3);
-    check(total(recovered) == 2700, "rejected candidate cannot become retained history after source deletion");
+    const auto recovered = test::usage_scan_pages(*active_host, request, 3);
+    check(test::usage_token_total(recovered) == 2700,
+        "rejected candidate cannot become retained history after source deletion");
     for (const auto& record : recovered.records) {
         check(record.temporal && record.temporal->retained_from &&
             record.temporal->retained_from->snapshot_id == first.cache_candidate->snapshot_id &&
@@ -480,14 +412,15 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
         select(std::string("carrier-output-") + kind, sealed);
         addon::Usage_scan_page observed;
         try {
-            observed = all_pages(request, 3);
+            observed = test::usage_scan_pages(*active_host, request, 3);
         }
         catch (const std::runtime_error& error) {
             if (std::string_view(kind) != "deep") throw;
             causal_failures.push_back("over-depth optional carrier rejected original accounting: " + std::string(error.what()));
             continue;
         }
-        check(total(observed) == 2700, "optional carrier cannot change original accounting");
+        check(test::usage_token_total(observed) == 2700,
+            "optional carrier cannot change original accounting");
         for (const auto& record : observed.records) {
             if (record.record_id == "qwen:session-0") {
                 check(record.temporal && record.temporal->portions.empty() &&
@@ -506,7 +439,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
             // future carrier; an actual counter correction cannot rebind it.
             sources = write_sources(profile, 10);
             select("carrier-live-refresh", observed.cache_candidate);
-            const auto refreshed = all_pages(request, 3);
+            const auto refreshed = test::usage_scan_pages(*active_host, request, 3);
             const auto refreshed_bytes = read_bytes(addon::usage_cache_io_path(
                 addon::path_from_utf8(refreshed.cache_candidate->root) / "records"));
             if (refreshed_bytes.find("\"opaque\":\"" + std::string(32, 'p') + "\"") == std::string::npos) {
@@ -514,7 +447,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
             }
             for (const auto& path : sources) check(fs::remove(path), "remove unchanged live fixture source");
             select("carrier-after-live-deletion", refreshed.cache_candidate);
-            const auto replayed = all_pages(request, 3);
+            const auto replayed = test::usage_scan_pages(*active_host, request, 3);
             const auto replayed_bytes = read_bytes(addon::usage_cache_io_path(
                 addon::path_from_utf8(replayed.cache_candidate->root) / "records"));
             if (replayed_bytes.find("\"opaque\":\"" + std::string(32, 'p') + "\"") == std::string::npos &&
@@ -522,14 +455,14 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
             {
                 causal_failures.push_back("source deletion did not retain the opaque future carrier");
             }
-            check(total(refreshed) == 2700 && total(replayed) == 2700,
+            check(test::usage_token_total(refreshed) == 2700 && test::usage_token_total(replayed) == 2700,
                 "live refresh and subsequent source deletion preserve original accounting");
             sources = write_sources(profile, 1);
             select("carrier-live-correction", replayed.cache_candidate);
-            const auto corrected = all_pages(request, 3);
+            const auto corrected = test::usage_scan_pages(*active_host, request, 3);
             const auto corrected_bytes = read_bytes(addon::usage_cache_io_path(
                 addon::path_from_utf8(corrected.cache_candidate->root) / "records"));
-            check(total(corrected) == 270 && corrected_bytes.find("\"opaque\":") == std::string::npos,
+            check(test::usage_token_total(corrected) == 270 && corrected_bytes.find("\"opaque\":") == std::string::npos,
                 "actual counter correction does not fabricate a binding for an unknown carrier");
             for (const auto& path : sources) check(fs::remove(path), "remove corrected live fixture source");
         }
@@ -562,23 +495,24 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
 
     select("reset", std::nullopt);
     request.mode = "reset";
-    const auto reset = all_pages(request, 3);
+    const auto reset = test::usage_scan_pages(*active_host, request, 3);
     check(reset.records.empty() && reset.cache_candidate, "reset reconstructs only current sources");
     validate(*reset.cache_candidate);
     validate(*first.cache_candidate);
     auto invalid_reset = request;
     invalid_reset.cache_selection->accepted = first.cache_candidate;
-    check(outcome_for(invalid_reset, 3).status != addon::Host_status::SUCCESS,
+    check(test::usage_scan_outcome(*active_host, invalid_reset, 3).status != addon::Host_status::SUCCESS,
         "reset cannot import a retained selection");
 
     auto old_request = first_request;
     old_request.cache_selection.reset();
-    check(total(all_pages(old_request, 2)) == 2700, "v3 scans and reset leave v2 cache untouched");
+    check(test::usage_token_total(test::usage_scan_pages(*active_host, old_request, 2)) == 2700,
+        "v3 scans and reset leave v2 cache untouched");
 
     select("occupied", first.cache_candidate);
     write(addon::usage_cache_io_path(addon::path_from_utf8(request.cache_selection->candidate_root) / "foreign"),
         "occupied");
-    check(outcome_for(request, 3).status != addon::Host_status::SUCCESS,
+    check(test::usage_scan_outcome(*active_host, request, 3).status != addon::Host_status::SUCCESS,
         "provider refuses a nonempty host allocation");
     validate(*first.cache_candidate);
 
@@ -588,7 +522,7 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
         fs::create_directories(conflicting);
     }
     request.cache_selection = addon::Usage_cache_selection{std::nullopt, addon::path_to_utf8(conflicting)};
-    check(outcome_for(request, 3).status != addon::Host_status::SUCCESS,
+    check(test::usage_scan_outcome(*active_host, request, 3).status != addon::Host_status::SUCCESS,
         "host candidates cannot enter the provider mutable namespace");
 
     select("wrong-account", first.cache_candidate);
@@ -599,13 +533,13 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
         2, qwen::account_key(other_profile), addon::path_to_utf8(other_profile)};
     wrong_account.context.launch_environment->bootstrap =
         addon::Environment_bootstrap_evidence{addon::path_to_utf8(other_profile)};
-    check(outcome_for(wrong_account, 3).status != addon::Host_status::SUCCESS,
+    check(test::usage_scan_outcome(*active_host, wrong_account, 3).status != addon::Host_status::SUCCESS,
         "selected cache cannot cross native profile and account ownership");
     validate(*first.cache_candidate);
 
     select("corrupt-input", first.cache_candidate);
     write(addon::usage_cache_io_path(addon::path_from_utf8(first.cache_candidate->root) / "unlisted"), "unexpected");
-    check(outcome_for(request, 3).status != addon::Host_status::SUCCESS,
+    check(test::usage_scan_outcome(*active_host, request, 3).status != addon::Host_status::SUCCESS,
         "corrupt selected inventory fails without fallback");
     check(active_host->shutdown(1000, nullptr), "packaged adapter exits without contacting a model");
 }
