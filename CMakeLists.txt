@@ -98,7 +98,8 @@ add_test(NAME qwen_wake_tests COMMAND qwen_wake_tests)
 set_tests_properties(qwen_wake_tests PROPERTIES TIMEOUT 60
     ENVIRONMENT "QWEN_LOGONOMIC_WAKE_BINDING=bfc0b538f38596aef4ac803b9f182cde")
 add_executable(qwen_preparation_tests tests/qwen_preparation_tests.cpp)
-target_link_libraries(qwen_preparation_tests PRIVATE qwen_provider)
+target_link_libraries(qwen_preparation_tests PRIVATE
+    qwen_provider logonomic_cli_addon_sdk::test_support)
 qwen_target(qwen_preparation_tests)
 add_dependencies(qwen_preparation_tests qwen_package)
 add_test(NAME qwen_preparation_tests COMMAND qwen_preparation_tests)
@@ -120,7 +121,8 @@ add_test(NAME qwen_package_validation COMMAND logonomic_cli_addon_validate "${QW
 add_test(NAME qwen_package_conformance COMMAND logonomic_cli_addon_conformance "${QWEN_PACKAGE_DIRECTORY}")
 set_tests_properties(qwen_contract_tests qwen_usage_tests qwen_acp_tests qwen_package_validation qwen_package_conformance PROPERTIES TIMEOUT 120)
 add_executable(qwen_usage_cache_tests tests/qwen_usage_cache_tests.cpp)
-target_link_libraries(qwen_usage_cache_tests PRIVATE qwen_provider)
+target_link_libraries(qwen_usage_cache_tests PRIVATE
+    qwen_provider logonomic_cli_addon_sdk::test_support)
 qwen_target(qwen_usage_cache_tests)
 add_dependencies(qwen_usage_cache_tests qwen_package)
 add_test(NAME qwen_usage_cache_tests

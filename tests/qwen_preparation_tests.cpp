@@ -6,6 +6,8 @@
 #include "qwen_json.h"
 #include "qwen_peer.h"
 
+#include <logonomic_cli_addon_test/invocation_context.h>
+
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/accounts.h>
 #include <logonomic_cli_addon/host_simulator.h>
@@ -31,22 +33,7 @@ namespace {
 
 namespace addon = logonomic::cli_addon;
 
-class Context final : public addon::Invocation_context
-{
-public:
-    const addon::Invoke_request& request() const override { return m_request; }
-    bool cancel_requested() const override { return m_cancelled; }
-    bool wait_for_cancel(int) override { return false; }
-    void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override {}
-    void succeed(addon::Json_value result) override { m_result = std::move(result); }
-    void fail(addon::Result_status status, std::string reason, std::string) override { m_failure_status = status; throw std::runtime_error(reason); }
-    bool finished() const override { return m_result.has_value(); }
-
-    addon::Invoke_request m_request;
-    std::optional<addon::Json_value> m_result;
-    std::optional<addon::Result_status> m_failure_status;
-    bool m_cancelled = false;
-};
+using Context = addon::test::Throwing_invocation_context;
 
 void require(bool condition, const char* description)
 {
