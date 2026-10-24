@@ -109,7 +109,9 @@ addon::Classify_event_result classify_event(const addon::Classify_event_request&
         }
     }
     addon::Contract_failure failure;
-    if (!addon::decode_lifecycle_observation(addon::encode_lifecycle_observation(observation), &failure)) {
+    if (!addon::decode_lifecycle_observation(addon::encode_lifecycle_observation(observation),
+            &failure, addon::Lifecycle_observation_policy::HELPER_INGRESS))
+    {
         result = {};
         result.lifecycle_degradation = addon::Lifecycle_degradation{1, session};
         return result;

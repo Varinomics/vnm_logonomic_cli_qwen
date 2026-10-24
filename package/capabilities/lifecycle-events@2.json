@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "capability_id": "lifecycle-events",
   "payload": {
     "profile_id": "qwen-command-hooks",

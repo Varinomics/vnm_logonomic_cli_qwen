@@ -139,7 +139,7 @@ std::optional<addon::Process_proposal> acp_process(
 void prepare_structured(addon::Invocation_context& invocation)
 {
     addon::Contract_failure failure;
-    const auto request = addon::decode_structured_prepare_request(invocation.request().payload, &failure, 3);
+    const auto request = addon::decode_structured_prepare_request(invocation.request().payload, &failure);
     if (!request) {
         invocation.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
         return;
@@ -159,13 +159,13 @@ void prepare_structured(addon::Invocation_context& invocation)
     result.profile_storage = request->context.profile_storage;
     result.account_context = request->context.account_context;
     result.inspection = {true, initial_acp_state(request->prompt), true};
-    invocation.succeed(addon::encode_structured_prepare_result(result, 3));
+    invocation.succeed(addon::encode_structured_prepare_result(result));
 }
 
 void prepare_delegated(addon::Invocation_context& invocation)
 {
     addon::Contract_failure failure;
-    const auto request = addon::decode_delegated_prepare_request(invocation.request().payload, &failure, 3);
+    const auto request = addon::decode_delegated_prepare_request(invocation.request().payload, &failure);
     if (!request) {
         invocation.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
         return;
@@ -199,7 +199,7 @@ void prepare_delegated(addon::Invocation_context& invocation)
         result.acknowledgment.server_ids.push_back(receipt.server_id);
         result.private_artifacts.push_back({receipt.parent_artifact, receipt.nonce});
     }
-    invocation.succeed(addon::encode_delegated_prepare_result(result, 3));
+    invocation.succeed(addon::encode_delegated_prepare_result(result));
 }
 
 void prepare_resume(addon::Invocation_context& invocation)

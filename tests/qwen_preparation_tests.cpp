@@ -166,10 +166,10 @@ void required_control_reaches_native_admission(const char* executable)
         {{"VNM_CONTROL_TOKEN", "qwen-host-authority-canary"}}});
     request.control.servers.push_back({"delegation", server_program, {"targets", "submit"}, {}});
     Context context;
-    context.m_request = {"delegated", {"delegated-session", 3}, "prepare", addon::encode_delegated_prepare_request(request, 3)};
+    context.m_request = {"delegated", {"delegated-session", 3}, "prepare", addon::encode_delegated_prepare_request(request)};
     qwen::handle_preparation(context);
     addon::Contract_failure failure;
-    const auto result = context.m_result ? addon::decode_delegated_prepare_result(*context.m_result, &failure, 3) : std::nullopt;
+    const auto result = context.m_result ? addon::decode_delegated_prepare_result(*context.m_result, &failure) : std::nullopt;
     require(result && result->acknowledgment.connection_version == addon::k_delegated_connection_version &&
         result->acknowledgment.server_ids == std::vector<std::string>{"coordination", "delegation"},
         "required actions reach a relay-acknowledged native proposal");
@@ -183,10 +183,10 @@ void required_control_reaches_native_admission(const char* executable)
         selected.context.launcher_argv.insert(selected.context.launcher_argv.end(), options.begin(), options.end());
         Context configured;
         configured.m_request = {"delegated", {"delegated-session", 3}, "prepare",
-            addon::encode_delegated_prepare_request(selected, 3)};
+            addon::encode_delegated_prepare_request(selected)};
         qwen::handle_preparation(configured);
         const auto proposal = configured.m_result
-            ? addon::decode_delegated_prepare_result(*configured.m_result, &failure, 3) : std::nullopt;
+            ? addon::decode_delegated_prepare_result(*configured.m_result, &failure) : std::nullopt;
         auto expected = selected.context.launcher_argv;
         expected.push_back("--acp");
         require(proposal && proposal->process.argv == expected, "launcher permission options are preserved in delegated ACP");
@@ -218,7 +218,7 @@ void required_control_reaches_native_admission(const char* executable)
 
     request.control.connection.reset();
     Context unconnected;
-    unconnected.m_request = {"delegated", {"delegated-session", 3}, "prepare", addon::encode_delegated_prepare_request(request, 3)};
+    unconnected.m_request = {"delegated", {"delegated-session", 3}, "prepare", addon::encode_delegated_prepare_request(request)};
     bool refused = false;
     try { qwen::handle_preparation(unconnected); }
     catch (const std::runtime_error& error) { refused = std::string(error.what()) == "task_server_connection_unavailable"; }

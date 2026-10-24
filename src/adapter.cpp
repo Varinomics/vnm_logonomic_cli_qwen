@@ -130,7 +130,7 @@ void invoke(addon::Invocation_context& context)
         else
         if (capability == "structured-session" && request.operation == "inspect") {
             addon::Contract_failure failure;
-            const auto decoded = addon::decode_structured_inspect_request(request.payload, &failure, 3);
+            const auto decoded = addon::decode_structured_inspect_request(request.payload, &failure);
             if (!decoded) {
                 context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
                 return;
@@ -139,7 +139,7 @@ void invoke(addon::Invocation_context& context)
                 context.fail(addon::Result_status::UNAVAILABLE, "purpose_unavailable");
                 return;
             }
-            context.succeed(addon::encode_structured_inspect_result(qwen::inspect_acp(decoded->inspection), 3));
+            context.succeed(addon::encode_structured_inspect_result(qwen::inspect_acp(decoded->inspection)));
         }
         else {
             qwen::handle_preparation(context);
@@ -165,7 +165,7 @@ int main()
         {"usage-temporal", 1},
         {"profile-storage", 1},
         {"launch-preparation", 3}, {"managed-configuration", 2}, {"helper-ingress", 2},
-        {"lifecycle-events", 1}, {"coordination-delivery", 1},
+        {"lifecycle-events", 2}, {"coordination-delivery", 1},
         {"session-wake", 1},
         {"model-context-delivery", 1},
         {addon::k_attention_kind_capability_id, addon::k_attention_kind_version},
