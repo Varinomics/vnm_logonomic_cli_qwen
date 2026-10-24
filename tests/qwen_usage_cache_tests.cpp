@@ -159,15 +159,13 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
             [] { return false; }, &failure).has_value(), "sealed candidate remains intact: " + failure.detail);
     };
 
-    check(test::usage_token_total(test::usage_scan_pages(*active_host, request, 2)) == 2700,
-        "v2 retains its existing namespace and telemetry");
     for (const auto& path : sources) {
         check(fs::remove(path), "remove fixture source");
     }
     select("empty-selection", std::nullopt);
     const auto empty = test::usage_scan_pages(*active_host, request, 3);
     check(empty.records.empty() && empty.cache_candidate,
-        "absent host selection never bootstraps from mutable provider cache");
+        "a fresh selection with absent source history contains no records");
     validate(*empty.cache_candidate);
 
     sources = write_sources(profile, 10);
@@ -504,26 +502,12 @@ void adapter_cache_contract(const fs::path& package, const fs::path& fixture)
     check(test::usage_scan_outcome(*active_host, invalid_reset, 3).status != addon::Host_status::SUCCESS,
         "reset cannot import a retained selection");
 
-    auto old_request = first_request;
-    old_request.cache_selection.reset();
-    check(test::usage_token_total(test::usage_scan_pages(*active_host, old_request, 2)) == 2700,
-        "v3 scans and reset leave v2 cache untouched");
-
     select("occupied", first.cache_candidate);
     write(addon::usage_cache_io_path(addon::path_from_utf8(request.cache_selection->candidate_root) / "foreign"),
         "occupied");
     check(test::usage_scan_outcome(*active_host, request, 3).status != addon::Host_status::SUCCESS,
         "provider refuses a nonempty host allocation");
     validate(*first.cache_candidate);
-
-    const auto mutable_path = storage / "qwen-usage-v1";
-    const auto conflicting = mutable_path / "host-candidate";
-    if (!fs::exists(mutable_path) || fs::is_directory(mutable_path)) {
-        fs::create_directories(conflicting);
-    }
-    request.cache_selection = addon::Usage_cache_selection{std::nullopt, addon::path_to_utf8(conflicting)};
-    check(test::usage_scan_outcome(*active_host, request, 3).status != addon::Host_status::SUCCESS,
-        "host candidates cannot enter the provider mutable namespace");
 
     select("wrong-account", first.cache_candidate);
     auto wrong_account = request;

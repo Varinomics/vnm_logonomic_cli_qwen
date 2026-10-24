@@ -126,8 +126,7 @@ digest binds the original event before replay and metadata rebinding. Damaged,
 stale or unsupported optional data cannot invalidate accounting, and bounded
 future carriers remain opaque. Original accounting has priority within source,
 cache, snapshot, result and page budgets. Published proof binds the actual
-account, record, total, snapshot and selected accepted manifest. Ordinary
-`usage-scan@2` results retain their accounting format.
+account, record, total, snapshot and selected accepted manifest.
 
 Native summaries contain no UUIDs or fork markers. A fork whose transcript was
 deleted before the package observed any copy provenance cannot be distinguished

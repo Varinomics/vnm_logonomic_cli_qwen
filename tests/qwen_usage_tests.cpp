@@ -4,6 +4,7 @@
 
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/sha256.h>
+#include <logonomic_cli_addon/stored_usage_accounting.h>
 
 #include <cstdint>
 #include <filesystem>
@@ -144,8 +145,8 @@ void native_temporal_uses_admitted_model_basis()
         records[0].temporal->portions.empty() && records[0].temporal->unavailable_tokens == 9,
         "same-accounting duplicate timestamp disagreement withdraws temporal proof only");
     write(source, dated_event("timed", native, "same", last));
-    const auto base_size = addon::serialize_json(addon::encode_usage_record(
-        qwen::scan_usage(workspace.path, context)[0], 2)).size();
+    const auto base_size = addon::serialize_json(addon::encode_stored_usage_accounting(
+        qwen::scan_usage(workspace.path, context)[0])).size();
     qwen::Usage_limits limits;
     limits.result_bytes = base_size;
     records = qwen::scan_usage(workspace.path, context, limits);
@@ -207,6 +208,17 @@ void partial_categories_and_torn_recovery()
         "known zero survives partial category coverage without claiming complete evidence");
 }
 
+void select_next_cache(addon::Usage_scan_request& request,
+    std::optional<addon::Usage_cache_reference> accepted)
+{
+    const auto root = addon::path_from_utf8(request.context.profile_storage->root);
+    const auto candidate = root / addon::random_nonce_hex();
+    require(fs::create_directory(candidate), "allocate an exclusive current cache candidate");
+    request.snapshot_id.reset();
+    request.cursor.reset();
+    request.cache_selection = addon::Usage_cache_selection{std::move(accepted), qwen::path_string(candidate)};
+}
+
 addon::Usage_scan_request request_for(const fs::path& home)
 {
     addon::Usage_scan_request request;
@@ -226,15 +238,16 @@ addon::Usage_scan_request request_for(const fs::path& home)
     fs::create_directories(storage);
     request.context.profile_storage = addon::Profile_storage_context{1, qwen::path_string(fs::canonical(storage))};
     request.context.account_context = addon::Account_context{2, qwen::account_key(home), qwen::path_string(home)};
+    select_next_cache(request, std::nullopt);
     return request;
 }
 
-Context invoke(const addon::Usage_scan_request& request, std::uint16_t version = 2)
+Context invoke(const addon::Usage_scan_request& request)
 {
     Context context;
-    context.invocation.capability = {"usage-scan", version};
+    context.invocation.capability = {"usage-scan", 3};
     context.invocation.operation = "scan";
-    context.invocation.payload = addon::encode_usage_scan_request(request, version);
+    context.invocation.payload = addon::encode_usage_scan_request(request, 3);
     qwen::handle_usage(context);
     return context;
 }
@@ -249,7 +262,7 @@ void pages_bind_exact_environment_and_survive_retry()
     auto first = invoke(request);
     require(first.result.has_value(), "first page succeeds");
     addon::Contract_failure failure;
-    const auto page = addon::decode_usage_scan_result(*first.result, &failure, 2);
+    const auto page = addon::decode_usage_scan_result(*first.result, &failure, 3);
     require(page && !page->complete && page->records.size() == 256 && page->incomplete_historical_coverage, "bounded first page reports recovered torn input");
     request.snapshot_id = page->snapshot_id;
     request.cursor = page->next_cursor;
@@ -269,13 +282,16 @@ std::string read(const fs::path& path)
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
-addon::Usage_scan_page successful_page(const addon::Usage_scan_request& request, std::uint16_t version = 2)
+addon::Usage_scan_page successful_page(addon::Usage_scan_request& request)
 {
-    const auto result = invoke(request, version);
+    const auto result = invoke(request);
     require(result.result.has_value(), "usage scan unexpectedly failed");
     addon::Contract_failure failure;
-    const auto page = addon::decode_usage_scan_result(*result.result, &failure, version);
-    require(page.has_value(), "usage page violates public codec");
+    const auto page = addon::decode_usage_scan_result(*result.result, &failure, 3);
+    require(page && page->complete && page->cache_candidate, "usage page violates public codec");
+    // The fixture accepts this complete candidate and selects it explicitly
+    // for its next scan, which always receives a fresh exclusive allocation.
+    select_next_cache(request, page->cache_candidate);
     return *page;
 }
 
@@ -308,7 +324,7 @@ std::uint64_t tokens_for(const addon::Usage_scan_page& page, std::string_view id
 
 void partial_sources_preserve_evidence_and_clean_corrections()
 {
-    // SDK usage-scan@2 distinguishes missing source evidence from an observed
+    // Current usage distinguishes missing source evidence from an observed
     // correction. Neither scan mode nor the incomplete-history flag erases it.
     Workspace workspace;
     auto request = request_for(workspace.path);
@@ -345,10 +361,9 @@ void partial_sources_preserve_evidence_and_clean_corrections()
     write(transcript, event("live", token_counts(20), "first-call"));
     require(tokens_for(successful_page(request), "live") == 60,
         "observed UUID counter correction replaces that event while retaining the missing sibling");
-    request.mode = "reset";
     fs::remove(transcript);
     require(tokens_for(successful_page(request), "live") == 60,
-        "fresh cache reload and reset preserve event-level evidence after source deletion");
+        "fresh selected-cache reload preserves event-level evidence after source deletion");
 }
 
 void forks_count_unique_calls_with_summaries_and_deleted_parents()
@@ -386,7 +401,7 @@ void forks_count_unique_calls_with_summaries_and_deleted_parents()
         require(nested.records.size() == 3 && tokens_for(nested, "parent") == 100 &&
             tokens_for(nested, "branch") == 25 && tokens_for(nested, "nested") == 7,
             "nested immediate copy links resolve to the original UUID owner independently of filename order");
-        const auto cache = addon::path_from_utf8(request.context.profile_storage->root) / "qwen-usage-v1/records";
+        const auto cache = addon::path_from_utf8(request.cache_selection->accepted->root) / "records";
         const auto accepted = read(cache);
         write(branch, event("branch", token_counts(99), "parent-call", "parent") +
             event("branch", token_counts(25), "branch-call"));
@@ -480,7 +495,7 @@ void temporal_bounds_preserve_original_rows_and_copy_owners()
         records[0].temporal->unavailable_tokens == 0,
         "the full admitted 4096-position boundary retains exact proof");
     qwen::Usage_limits limits;
-    limits.result_bytes = addon::serialize_json(addon::encode_usage_record(records[0], 2)).size() + 4096;
+    limits.result_bytes = addon::serialize_json(addon::encode_stored_usage_accounting(records[0])).size() + 4096;
     records = qwen::scan_usage(workspace.path, context, limits);
     require(records[0].total_tokens == 4096 && records[0].temporal &&
         records[0].temporal->portions.empty() && records[0].temporal->coverage_reason == "capacity",
@@ -494,7 +509,7 @@ void temporal_bounds_preserve_original_rows_and_copy_owners()
     const auto candidate = addon::path_from_utf8(request.context.profile_storage->root) / "candidate";
     fs::create_directories(candidate);
     request.cache_selection = addon::Usage_cache_selection{std::nullopt, qwen::path_string(candidate)};
-    const auto page = successful_page(request, 3);
+    const auto page = successful_page(request);
     require(page.complete && page.records.size() == 8 &&
         addon::serialize_json(addon::encode_usage_scan_result(page, 3)).size() <= 2 * 1024 * 1024,
         "actual metadata and cursor framing fit Qwen's complete page bound");
@@ -513,9 +528,10 @@ void current_scans_refresh_durable_history()
     Workspace workspace;
     auto request = request_for(workspace.path);
     const auto source = workspace.path / "usage_record.jsonl";
-    const auto cache = addon::path_from_utf8(request.context.profile_storage->root) / "qwen-usage-v1/records";
     write(source, summary("retained", 30));
-    require(successful_page(request).records[0].total_tokens == 30 && fs::is_regular_file(cache),
+    const auto first = successful_page(request);
+    require(first.records[0].total_tokens == 30 &&
+        fs::is_regular_file(addon::path_from_utf8(first.cache_candidate->root) / "records"),
         "first successful page already has durable session evidence");
     write(source, summary("retained", 40));
     require(successful_page(request).records[0].total_tokens == 40,
@@ -524,29 +540,37 @@ void current_scans_refresh_durable_history()
     const auto retained = successful_page(request); // New scan reads disk, never an in-memory continuation.
     require(retained.records.size() == 1 && retained.records[0].total_tokens == 40 && retained.incomplete_historical_coverage,
         "removed native history survives durable cache reload");
-    request.mode = "reset";
-    require(successful_page(request).records[0].total_tokens == 40, "reset mode is not permission to discard retained history");
     request.mode = "repair";
     write(source, summary("retained", 5));
     require(successful_page(request).records[0].total_tokens == 5, "current same-session correction may reduce totals exactly");
+    const auto cache = addon::path_from_utf8(request.cache_selection->accepted->root) / "records";
     const auto accepted = read(cache);
-    const auto pending = cache.parent_path() / "records.pending";
-    fs::create_directory(pending);
+    const auto occupied = addon::path_from_utf8(request.cache_selection->candidate_root) / "occupied";
+    fs::create_directory(occupied);
     require(!invoke(request).result && read(cache) == accepted,
-        "invalid replacement destination fails before publication without altering accepted evidence");
-    fs::remove(pending);
+        "nonempty candidate allocation fails without altering accepted evidence");
+    fs::remove(occupied);
     write(cache, accepted.substr(0, accepted.size() / 2));
     const auto corrupt = invoke(request);
     require(!corrupt.result, "truncated required cache fails instead of rebuilding incomplete totals");
     write(cache, accepted);
+
     Workspace foreign;
     auto other = request_for(foreign.path);
-    const auto other_cache = addon::path_from_utf8(other.context.profile_storage->root) / "qwen-usage-v1/records";
-    write(other_cache, accepted);
+    const auto other_root = addon::path_from_utf8(other.context.profile_storage->root);
+    const auto foreign_cache = other_root / "foreign-accounting";
+    require(fs::create_directory(foreign_cache), "allocate foreign accounting fixture");
+    write(foreign_cache / "records", accepted);
+    addon::Contract_failure failure;
+    const auto foreign_reference = addon::seal_usage_cache_candidate(qwen::path_string(foreign_cache),
+        other.context.profile_storage->root, other.context.account_context, addon::random_nonce_hex(),
+        "qwen-evidence-cache@1", [] { return false; }, &failure);
+    require(foreign_reference.has_value(), "seal the current foreign-account cache fixture");
+    other.cache_selection->accepted = foreign_reference;
     require(invoke(other).failure == "usage_cache_owner_mismatch", "cache footer cannot confer another account's ownership");
-    std::size_t files = 0;
-    for (const auto& entry : fs::directory_iterator(cache.parent_path())) { (void)entry; ++files; }
-    require(files == 2, "repeated scans and failures leave only accepted evidence and fixed lock");
+    require(addon::validate_usage_cache_candidate(*request.cache_selection->accepted,
+        request.context.profile_storage->root, request.context.account_context,
+        [] { return false; }, &failure).has_value(), "failed candidates leave restored accepted evidence intact");
 }
 
 void equivalent_windows_profile_spelling_reuses_cache()
@@ -563,6 +587,7 @@ void equivalent_windows_profile_spelling_reuses_cache()
     require(next.context.account_context->adapter_account_key == first.context.account_context->adapter_account_key,
         "Windows casing aliases have the same admitted account identity");
     next.context.profile_storage = first.context.profile_storage;
+    select_next_cache(next, first.cache_selection->accepted);
     const auto retained = successful_page(next);
     require(retained.records.size() == 1 && retained.records[0].total_tokens == 30 && retained.incomplete_historical_coverage,
         "equivalent Windows profile spelling reloads required durable evidence across fresh scans");

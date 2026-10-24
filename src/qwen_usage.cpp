@@ -5,6 +5,7 @@
 
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/sha256.h>
+#include <logonomic_cli_addon/stored_usage_accounting.h>
 
 #include <algorithm>
 #include <array>
@@ -19,14 +20,12 @@
 #include <set>
 #include <stdexcept>
 #include <system_error>
-#include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <cerrno>
 #include <fcntl.h>
-#include <sys/file.h>
 #include <unistd.h>
 #endif
 
@@ -588,14 +587,14 @@ bool collect_summaries(
             const auto previous = sessions.find(json_util::text(row, "sessionId"));
             if (previous != sessions.end()) {
                 const auto size = addon::serialize_json(json_util::object({{"summary",
-                    addon::encode_usage_record(previous->second.record, 2)}})).size() + 1;
+                    addon::encode_stored_usage_accounting(previous->second.record)}})).size() + 1;
                 budget.core_resident_bytes -= size;
                 staged_summary_bytes -= size;
             }
             append_summary(row, sessions, history);
             const auto& record = sessions.at(json_util::text(row, "sessionId")).record;
             const auto size = addon::serialize_json(json_util::object({{"summary",
-                addon::encode_usage_record(record, 2)}})).size() + 1;
+                addon::encode_stored_usage_accounting(record)}})).size() + 1;
             staged_summary_bytes += size;
             reserve_original(budget, evidence, size);
             if (sessions.size() > budget.limits.records) {
@@ -619,7 +618,7 @@ bool collect_summaries(
         const auto key = session.record.record_id;
         const auto previous = evidence.summaries.find(key);
         const auto previous_size = previous == evidence.summaries.end() ? 0 :
-            addon::serialize_json(json_util::object({{"summary", addon::encode_usage_record(previous->second, 2)}})).size() + 1;
+            addon::serialize_json(json_util::object({{"summary", addon::encode_stored_usage_accounting(previous->second)}})).size() + 1;
         if (summaries_complete) {
             evidence.summaries.insert_or_assign(key, std::move(session.record));
         }
@@ -634,7 +633,7 @@ bool collect_summaries(
         if (const auto accepted = evidence.summaries.find(key); accepted != evidence.summaries.end()) {
             budget.core_resident_bytes -= previous_size;
             reserve_original(budget, evidence,
-                addon::serialize_json(json_util::object({{"summary", addon::encode_usage_record(accepted->second, 2)}})).size() + 1);
+                addon::serialize_json(json_util::object({{"summary", addon::encode_stored_usage_accounting(accepted->second)}})).size() + 1);
         }
     }
     return summaries_complete && retained_complete;
@@ -774,7 +773,7 @@ void validate_temporal(addon::Usage_record& record)
 }
 
 std::vector<addon::Usage_record> records_for(
-    Evidence& evidence, Budget& budget, addon::Invocation_context& context, bool include_temporal = true)
+    Evidence& evidence, Budget& budget, addon::Invocation_context& context)
 {
     const auto evidence_bytes = bound_optional_evidence(evidence, context);
     // A UUID survives every fork, while prompt_id and forkedFrom name the
@@ -863,20 +862,12 @@ std::vector<addon::Usage_record> records_for(
     for (const auto& [id, record] : records) {
         (void)id;
         check_cancel(context);
-        const auto encoded = addon::encode_usage_record(record, 2);
+        const auto encoded = addon::encode_stored_usage_accounting(record);
         addon::Contract_failure failure;
-        if (!addon::decode_usage_record(encoded, &failure, 2)) throw Usage_error("usage_record_invalid");
+        if (!addon::decode_stored_usage_accounting(encoded, &failure)) throw Usage_error("usage_record_invalid");
         const auto size = addon::serialize_json(encoded).size();
         if (size > k_max_page_bytes || size > budget.limits.result_bytes - bytes) throw Usage_error("usage_history_capacity");
         bytes += size;
-    }
-    if (!include_temporal) {
-        std::vector<addon::Usage_record> result;
-        for (auto& [id, record] : records) {
-            (void)id;
-            result.push_back(std::move(record));
-        }
-        return result;
     }
     // Core accounting is admitted in full before any optional allocations.
     // Every portion uses the same model-wide basis as aggregate(), after UUID
@@ -999,9 +990,7 @@ std::vector<addon::Usage_record> records_for(
     return result; // map order is the stable public record-id order.
 }
 
-// Exactly three owned files: accepted records, one replacement, and an empty
-// cross-generation lock. Each data file is capped at 1 GiB before writes;
-// aggregate disk use cannot exceed 2 GiB. No generations or sort runs accumulate.
+// Both candidate accounting files are capped at 1 GiB before writes.
 void regular_or_absent(const fs::path& path)
 {
     std::error_code error;
@@ -1009,77 +998,6 @@ void regular_or_absent(const fs::path& path)
     if (error && error != std::errc::no_such_file_or_directory) throw Usage_error("usage_storage_unavailable");
     if (fs::exists(status) && (!fs::is_regular_file(status) || fs::file_size(path) > k_snapshot_bytes))
         throw Usage_error("usage_storage_invalid");
-}
-
-class Storage_lock final
-{
-public:
-    Storage_lock(const fs::path& path, addon::Invocation_context& context)
-    {
-        regular_or_absent(path);
-#ifdef _WIN32
-        while (m_handle == INVALID_HANDLE_VALUE) {
-            check_cancel(context);
-            m_handle = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (m_handle != INVALID_HANDLE_VALUE) break;
-            if (GetLastError() != ERROR_SHARING_VIOLATION) throw Usage_error("usage_storage_lock_failed");
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-#else
-        m_descriptor = open(path.c_str(), O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600);
-        if (m_descriptor < 0) throw Usage_error("usage_storage_lock_failed");
-        while (flock(m_descriptor, LOCK_EX | LOCK_NB) != 0) {
-            const auto failure = errno;
-            if (context.cancel_requested() || (failure != EWOULDBLOCK && failure != EAGAIN && failure != EINTR)) {
-                close(m_descriptor);
-                m_descriptor = -1;
-                throw Usage_error(context.cancel_requested() ? "cancelled" : "usage_storage_lock_failed");
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-#endif
-    }
-    ~Storage_lock()
-    {
-#ifdef _WIN32
-        if (m_handle != INVALID_HANDLE_VALUE) CloseHandle(m_handle);
-#else
-        if (m_descriptor >= 0) close(m_descriptor);
-#endif
-    }
-    Storage_lock(const Storage_lock&) = delete;
-    Storage_lock& operator=(const Storage_lock&) = delete;
-private:
-#ifdef _WIN32
-    HANDLE m_handle = INVALID_HANDLE_VALUE;
-#else
-    int m_descriptor = -1;
-#endif
-};
-
-fs::path storage_directory(const addon::Usage_scan_request& request)
-{
-    if (!request.context.profile_storage) throw Usage_error("usage_profile_storage_unavailable");
-    const auto root = addon::path_from_utf8(request.context.profile_storage->root);
-    if (!fs::is_directory(fs::symlink_status(root))) throw Usage_error("usage_storage_invalid");
-    const auto directory = root / "qwen-usage-v1";
-    std::error_code error;
-    if (!fs::exists(directory, error)) fs::create_directory(directory);
-    if (!fs::is_directory(fs::symlink_status(directory))) throw Usage_error("usage_storage_invalid");
-    return directory;
-}
-
-void inspect_storage(const fs::path& directory)
-{
-    std::size_t count = 0;
-    for (const auto& entry : fs::directory_iterator(directory)) {
-        if (++count > 3) throw Usage_error("usage_storage_capacity");
-        const auto name = path_string(entry.path().filename());
-        if (name != "records" && name != "records.pending" && name != "lock") throw Usage_error("usage_storage_invalid");
-        regular_or_absent(entry.path());
-        if (name == "lock" && fs::file_size(entry.path()) != 0) throw Usage_error("usage_storage_invalid");
-    }
 }
 
 std::string cache_owner(const addon::Usage_scan_request& request, const fs::path& home)
@@ -1154,11 +1072,11 @@ void visit_evidence(const Evidence& evidence, Consumer consume, bool optional = 
 {
     for (const auto& [id, summary] : evidence.summaries) {
         (void)id;
-        consume(json_util::object({{"summary", addon::encode_usage_record(summary, 2)}}));
+        consume(json_util::object({{"summary", addon::encode_stored_usage_accounting(summary)}}));
     }
     for (const auto& [id, transcript] : evidence.transcripts) {
         consume(json_util::object({
-            {"transcript", addon::encode_usage_record(transcript.metadata, 2)},
+            {"transcript", addon::encode_stored_usage_accounting(transcript.metadata)},
             {"forked", Json(transcript.forked)}, {"published", Json(transcript.published)}}));
         for (const auto& [uuid, event] : transcript.events) {
             auto row = encode_event(id, uuid, event);
@@ -1173,7 +1091,7 @@ void visit_evidence(const Evidence& evidence, Consumer consume, bool optional = 
 std::uint64_t transcript_core_bytes(std::string_view id, const Transcript& transcript)
 {
     auto bytes = addon::serialize_json(json_util::object({
-        {"transcript", addon::encode_usage_record(transcript.metadata, 2)},
+        {"transcript", addon::encode_stored_usage_accounting(transcript.metadata)},
         {"forked", Json(transcript.forked)}, {"published", Json(transcript.published)}})).size() + 1;
     for (const auto& [uuid, event] : transcript.events) {
         bytes += addon::serialize_json(encode_event(id, uuid, event)).size() + 1;
@@ -1466,7 +1384,7 @@ std::optional<Evidence> read_cache(const fs::path& path, std::string_view owner,
         addon::Contract_failure failure;
         if (row->find("summary") || row->find("transcript")) {
             const bool summary = row->find("summary") != nullptr;
-            auto record = addon::decode_usage_record(json_util::member(*row, summary ? "summary" : "transcript"), &failure, 2);
+            auto record = addon::decode_stored_usage_accounting(json_util::member(*row, summary ? "summary" : "transcript"), &failure);
             if (!record || !record->record_id.starts_with("qwen:") ||
                 record->session_key != record->record_id)
             {
@@ -1515,7 +1433,7 @@ std::optional<Evidence> read_cache(const fs::path& path, std::string_view owner,
             event.error          = json_util::member(*row, "error").as_boolean();
             auto date_record = transcript->second.metadata;
             date_record.completed_date = event.completed_date;
-            if (!addon::decode_usage_record(addon::encode_usage_record(date_record, 2), &failure, 2) ||
+            if (!addon::decode_stored_usage_accounting(addon::encode_stored_usage_accounting(date_record), &failure) ||
                 (!event.copied_from.empty() && (!event.copied_from.starts_with("qwen:") ||
                     event.copied_from.size() == 5 || !transcript->second.forked)))
             {
@@ -1651,7 +1569,7 @@ void replace_cache(const fs::path& directory, std::string_view owner,
         visit_evidence(evidence, [&](const Json& row) {
             check_cancel(context);
             write(addon::serialize_json(row));
-        }, context.request().capability.version == 3);
+        }, true);
         output << addon::serialize_json(json_util::object({{"end", Json(std::int64_t{1})},
             {"count", Json(count)}, {"sha256", Json(addon::to_hex(digest.finish()))}})) << '\n';
         output.flush();
@@ -1691,61 +1609,50 @@ void replace_cache(const fs::path& directory, std::string_view owner,
 void collect_retained(const addon::Usage_scan_request& request, const fs::path& home,
     Snapshot& candidate, addon::Invocation_context& context)
 {
-    const auto directory = request.cache_selection
-        ? addon::usage_cache_io_path(addon::path_from_utf8(request.cache_selection->candidate_root))
-        : storage_directory(request);
-    std::unique_ptr<Storage_lock> storage_lock;
+    const auto directory = addon::usage_cache_io_path(addon::path_from_utf8(request.cache_selection->candidate_root));
     fs::path input_file = directory / "records";
-    if (request.cache_selection) {
-        addon::Contract_failure failure;
-        const auto& selection = *request.cache_selection;
-        const auto& root = request.context.profile_storage->root;
-        if (!addon::validate_usage_cache_allocation(selection.candidate_root, root, &failure)) {
-            throw Usage_error(failure.reason_code);
-        }
-        if (selection.accepted) {
-            const auto manifest = addon::validate_usage_cache_candidate(
-                *selection.accepted, root, request.context.account_context,
-                [&context] { return context.cancel_requested(); }, &failure);
-            if (!manifest) throw Usage_error(failure.reason_code);
-            const bool has_records = std::any_of(manifest->files.begin(), manifest->files.end(),
-                [](const auto& file) { return file.path == "records"; });
-            const bool known_files = std::all_of(manifest->files.begin(), manifest->files.end(),
-                [](const auto& file) { return file.path == "records" || file.path == "source-index"; });
-            if (manifest->format != "qwen-evidence-cache@1" || !has_records || !known_files ||
-                manifest->files.size() > 2)
-            {
-                throw Usage_error("usage_cache_format_unsupported");
-            }
-            input_file = addon::usage_cache_io_path(addon::path_from_utf8(selection.accepted->root)) / "records";
-        }
+    addon::Contract_failure failure;
+    const auto& selection = *request.cache_selection;
+    const auto& root = request.context.profile_storage->root;
+    if (!addon::validate_usage_cache_allocation(selection.candidate_root, root, &failure)) {
+        throw Usage_error(failure.reason_code);
     }
-    else {
-        storage_lock = std::make_unique<Storage_lock>(directory / "lock", context);
-        inspect_storage(directory);
+    if (selection.accepted) {
+        const auto manifest = addon::validate_usage_cache_candidate(
+            *selection.accepted, root, request.context.account_context,
+            [&context] { return context.cancel_requested(); }, &failure);
+        if (!manifest) throw Usage_error(failure.reason_code);
+        const bool has_records = std::any_of(manifest->files.begin(), manifest->files.end(),
+            [](const auto& file) { return file.path == "records"; });
+        const bool known_files = std::all_of(manifest->files.begin(), manifest->files.end(),
+            [](const auto& file) { return file.path == "records" || file.path == "source-index"; });
+        if (manifest->format != "qwen-evidence-cache@1" || !has_records || !known_files ||
+            manifest->files.size() > 2)
+        {
+            throw Usage_error("usage_cache_format_unsupported");
+        }
+        input_file = addon::usage_cache_io_path(addon::path_from_utf8(selection.accepted->root)) / "records";
     }
     const auto owner = cache_owner(request, home);
     auto retained = read_cache(input_file, owner, context);
     Budget budget{Usage_limits{}};
     auto evidence = retained ? std::move(*retained) : Evidence{};
     Source_index source_index;
-    if (request.cache_selection && retained && request.mode == "incremental") {
+    if (retained && request.mode == "incremental") {
         source_index = read_source_index(input_file.parent_path() / "source-index", evidence, context);
     }
-    collect(home, evidence, budget, context, request.cache_selection ? &source_index : nullptr);
-    candidate.records = records_for(evidence, budget, context, context.request().capability.version == 3);
+    collect(home, evidence, budget, context, &source_index);
+    candidate.records = records_for(evidence, budget, context);
     candidate.incomplete = budget.incomplete;
     for (const auto& record : candidate.records) {
         check_cancel(context);
-        const auto size = addon::serialize_json(addon::encode_usage_record(record, 2)).size();
+        const auto size = addon::serialize_json(addon::encode_stored_usage_accounting(record)).size();
         if (size > k_snapshot_bytes - candidate.bytes) throw Usage_error("usage_history_capacity");
         candidate.bytes += size;
     }
     (void)bound_optional_evidence(evidence, context);
     replace_cache(directory, owner, evidence, context);
-    if (request.cache_selection) {
-        write_source_index(directory, source_index, context);
-    }
+    write_source_index(directory, source_index, context);
 }
 
 } // namespace
@@ -1763,8 +1670,7 @@ void handle_usage(addon::Invocation_context& context)
 {
     if (context.request().operation != "scan") { context.reject_unknown_operation(); return; }
     addon::Contract_failure failure;
-    const auto version = context.request().capability.version;
-    const auto request = addon::decode_usage_scan_request(context.request().payload, &failure, version);
+    const auto request = addon::decode_usage_scan_request(context.request().payload, &failure, 3);
     if (!request) { context.fail(addon::Result_status::FAILED, failure.reason_code); return; }
     try {
         if (!request->context.launch_environment || !request->context.launch_environment->bootstrap)
@@ -1774,33 +1680,11 @@ void handle_usage(addon::Invocation_context& context)
         identity.snapshot_id.reset();
         identity.cursor.reset();
         const auto owner = addon::to_hex(addon::Sha256::digest(
-            addon::serialize_json_canonical(addon::encode_usage_scan_request(identity, version))));
-        if (version == 3) {
-            const auto& selection = *request->cache_selection;
-            const auto& root = request->context.profile_storage->root;
-            if (!addon::validate_usage_cache_root(selection.candidate_root, root, &failure)) {
-                throw Usage_error(failure.reason_code);
-            }
-            const auto outside_mutable = [&](const std::string& selected) {
-                const auto mutable_path = addon::path_from_utf8(root) / "qwen-usage-v1";
-                for (auto path = addon::path_from_utf8(selected); path.has_relative_path(); path = path.parent_path()) {
-                    std::error_code error;
-                    if (fs::equivalent(path, mutable_path, error)) {
-                        return false;
-                    }
-                }
-                const auto relative = addon::path_from_utf8(selected).lexically_relative(addon::path_from_utf8(root));
-                auto name = path_string(*relative.begin());
-#ifdef _WIN32
-                name = addon::ascii_lowercase(name);
-#endif
-                return name != "qwen-usage-v1";
-            };
-            if (!outside_mutable(selection.candidate_root) ||
-                (selection.accepted && !outside_mutable(selection.accepted->root)))
-            {
-                throw Usage_error("usage_cache_namespace_conflict");
-            }
+            addon::serialize_json_canonical(addon::encode_usage_scan_request(identity, 3))));
+        const auto& selection = *request->cache_selection;
+        const auto& root = request->context.profile_storage->root;
+        if (!addon::validate_usage_cache_root(selection.candidate_root, root, &failure)) {
+            throw Usage_error(failure.reason_code);
         }
         std::size_t begin = 0;
         std::shared_ptr<const Snapshot> snapshot;
@@ -1825,49 +1709,47 @@ void handle_usage(addon::Invocation_context& context)
             candidate->owner = owner;
             if (request->context.account_context) candidate->scope.source_account_key = request->context.account_context->adapter_account_key;
             identifier = addon::random_nonce_hex();
-            if (version == 3) {
-                // Surviving summaries and events cannot certify complete session history.
-                for (auto& record : candidate->records) {
-                    check_cancel(context);
-                    record.aggregate_evidence = "partial";
-                    if (record.temporal) {
-                        record.temporal->parent.snapshot_id = identifier;
-                        record.temporal->parent.source_account_key = candidate->scope.source_account_key;
-                        if (request->cache_selection->accepted) {
-                            const auto& accepted = *request->cache_selection->accepted;
-                            record.temporal->retained_from = addon::Usage_temporal_retained_from{
-                                accepted.snapshot_id, accepted.manifest_sha256_hex};
-                        }
-                        validate_temporal(record);
+            // Surviving summaries and events cannot certify complete session history.
+            for (auto& record : candidate->records) {
+                check_cancel(context);
+                record.aggregate_evidence = "partial";
+                if (record.temporal) {
+                    record.temporal->parent.snapshot_id = identifier;
+                    record.temporal->parent.source_account_key = candidate->scope.source_account_key;
+                    if (request->cache_selection->accepted) {
+                        const auto& accepted = *request->cache_selection->accepted;
+                        record.temporal->retained_from = addon::Usage_temporal_retained_from{
+                            accepted.snapshot_id, accepted.manifest_sha256_hex};
                     }
+                    validate_temporal(record);
                 }
-                candidate->cache_candidate = addon::seal_usage_cache_candidate(
-                    request->cache_selection->candidate_root, request->context.profile_storage->root,
-                    request->context.account_context, identifier, "qwen-evidence-cache@1",
-                    [&context] { return context.cancel_requested(); }, &failure);
-                if (!candidate->cache_candidate) throw Usage_error(failure.reason_code);
-                // Optional typed records share the original snapshot budget.
-                // Measure all original records first, then retain fitting proof.
-                candidate->bytes = 0;
-                for (const auto& record : candidate->records) {
-                    auto original = record;
-                    original.temporal.reset();
-                    const auto size = addon::serialize_json(addon::encode_usage_record(original, 3)).size();
-                    if (size > k_snapshot_bytes - candidate->bytes) throw Usage_error("usage_history_capacity");
-                    candidate->bytes += size;
+            }
+            candidate->cache_candidate = addon::seal_usage_cache_candidate(
+                request->cache_selection->candidate_root, request->context.profile_storage->root,
+                request->context.account_context, identifier, "qwen-evidence-cache@1",
+                [&context] { return context.cancel_requested(); }, &failure);
+            if (!candidate->cache_candidate) throw Usage_error(failure.reason_code);
+            // Optional typed records share the original snapshot budget.
+            // Measure all original records first, then retain fitting proof.
+            candidate->bytes = 0;
+            for (const auto& record : candidate->records) {
+                auto original = record;
+                original.temporal.reset();
+                const auto size = addon::serialize_json(addon::encode_usage_record(original, 3)).size();
+                if (size > k_snapshot_bytes - candidate->bytes) throw Usage_error("usage_history_capacity");
+                candidate->bytes += size;
+            }
+            for (auto& record : candidate->records) {
+                if (!record.temporal) continue;
+                auto original = record;
+                original.temporal.reset();
+                const auto additional = addon::serialize_json(addon::encode_usage_record(record, 3)).size() -
+                    addon::serialize_json(addon::encode_usage_record(original, 3)).size();
+                if (additional > k_snapshot_bytes - candidate->bytes) {
+                    record.temporal.reset();
                 }
-                for (auto& record : candidate->records) {
-                    if (!record.temporal) continue;
-                    auto original = record;
-                    original.temporal.reset();
-                    const auto additional = addon::serialize_json(addon::encode_usage_record(record, 3)).size() -
-                        addon::serialize_json(addon::encode_usage_record(original, 3)).size();
-                    if (additional > k_snapshot_bytes - candidate->bytes) {
-                        record.temporal.reset();
-                    }
-                    else {
-                        candidate->bytes += additional;
-                    }
+                else {
+                    candidate->bytes += additional;
                 }
             }
             while (!snapshot_order.empty()) {
@@ -1885,37 +1767,28 @@ void handle_usage(addon::Invocation_context& context)
         page.scope = snapshot->scope;
         page.snapshot_id = identifier;
         page.cache_candidate = snapshot->cache_candidate;
-        if (version == 3) {
-            page.account_context = request->context.account_context;
-            page.profile_storage = request->context.profile_storage;
-        }
+        page.account_context = request->context.account_context;
+        page.profile_storage = request->context.profile_storage;
         page.incomplete_historical_coverage = snapshot->incomplete;
         std::size_t end = begin;
         std::size_t bytes = 0;
         while (end < snapshot->records.size() && page.records.size() < addon::k_max_usage_page_records) {
             check_cancel(context);
-            if (version != 3) {
-                const auto size = addon::serialize_json(addon::encode_usage_record(snapshot->records[end], version)).size();
-                if (size > k_max_page_bytes - bytes) break;
-                bytes += size;
-                page.records.push_back(snapshot->records[end++]);
-                continue;
-            }
             auto record = snapshot->records[end];
             const auto admit = [&](const addon::Usage_record& selected) {
                 const bool complete = end + 1 == snapshot->records.size();
                 page.complete = complete;
                 page.next_cursor = complete ? std::nullopt : std::optional(std::to_string(end + 1));
-                if (!addon::append_usage_page_record(page, selected, bytes, version)) {
+                if (!addon::append_usage_page_record(page, selected, bytes, 3)) {
                     return false;
                 }
-                const auto encoded = addon::encode_usage_scan_result(page, version);
+                const auto encoded = addon::encode_usage_scan_result(page, 3);
                 const auto serialized = addon::serialize_json(encoded);
                 if (serialized.size() > k_max_page_bytes || !addon::parse_json(serialized, {}, nullptr) ||
-                    !addon::decode_usage_scan_result(encoded, &failure, version))
+                    !addon::decode_usage_scan_result(encoded, &failure, 3))
                 {
                     page.records.pop_back();
-                    bytes -= addon::serialize_json(addon::encode_usage_record(selected, version)).size() + 1;
+                    bytes -= addon::serialize_json(addon::encode_usage_record(selected, 3)).size() + 1;
                     return false;
                 }
                 return true;
@@ -1938,7 +1811,7 @@ void handle_usage(addon::Invocation_context& context)
         if (!page.complete) page.next_cursor = std::to_string(end);
         check_cancel(context);
         lock.unlock();
-        context.succeed(addon::encode_usage_scan_result(page, version));
+        context.succeed(addon::encode_usage_scan_result(page, 3));
     } catch (const Usage_error& error) {
         context.fail(error.what() == std::string_view("cancelled") ? addon::Result_status::CANCELLED : addon::Result_status::FAILED, error.what());
     } catch (const std::exception&) {
