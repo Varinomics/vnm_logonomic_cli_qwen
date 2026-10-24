@@ -1,0 +1,7 @@
+{
+  "capability_id": "conversation-export",
+  "version": 1,
+  "payload": {
+    "environment_names": ["QWEN_HOME", "HOME", "USERPROFILE"]
+  }
+}
