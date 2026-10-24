@@ -57,8 +57,18 @@ resolved_profile_t profile_for_context(const addon::Session_launch_context& cont
     auto profile = profile_from_environment(*context.launch_environment);
     if (!context.account_context) return profile;
     if (!context.account_context->profile_path ||
-        account_key(profile.home) != context.account_context->adapter_account_key ||
-        path_string(profile.home) != *context.account_context->profile_path)
+        account_key(profile.home) != context.account_context->adapter_account_key)
+    {
+        throw std::runtime_error("account_profile_mismatch");
+    }
+#ifdef _WIN32
+    const bool profile_path_matches =
+        account_key(addon::path_from_utf8(*context.account_context->profile_path)) ==
+        context.account_context->adapter_account_key;
+#else
+    const bool profile_path_matches = path_string(profile.home) == *context.account_context->profile_path;
+#endif
+    if (!profile_path_matches)
     {
         throw std::runtime_error("account_profile_mismatch");
     }

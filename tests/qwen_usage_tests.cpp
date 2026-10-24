@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <source_location>
 #include <stdexcept>
 
 namespace json_util = logonomic::cli_addon::json;
@@ -282,10 +283,15 @@ std::string read(const fs::path& path)
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
-addon::Usage_scan_page successful_page(addon::Usage_scan_request& request)
+addon::Usage_scan_page successful_page(
+    addon::Usage_scan_request& request,
+    std::source_location location = std::source_location::current())
 {
     const auto result = invoke(request);
-    require(result.result.has_value(), "usage scan unexpectedly failed");
+    if (!result.result) {
+        throw std::runtime_error(std::string(location.function_name()) + ":" +
+            std::to_string(location.line()) + ": usage scan unexpectedly failed: " + result.failure);
+    }
     addon::Contract_failure failure;
     const auto page = addon::decode_usage_scan_result(*result.result, &failure, 3);
     require(page && page->complete && page->cache_candidate, "usage page violates public codec");
@@ -586,11 +592,35 @@ void equivalent_windows_profile_spelling_reuses_cache()
     auto next = request_for(equivalent);
     require(next.context.account_context->adapter_account_key == first.context.account_context->adapter_account_key,
         "Windows casing aliases have the same admitted account identity");
+    next.context.account_context = first.context.account_context;
     next.context.profile_storage = first.context.profile_storage;
     select_next_cache(next, first.cache_selection->accepted);
+    require(qwen::profile_for_context(next.context).home == equivalent,
+        "native profile spelling may vary while the selected account context remains exact");
+    addon::Contract_failure failure;
+    require(addon::validate_usage_cache_candidate(*next.cache_selection->accepted,
+        next.context.profile_storage->root, next.context.account_context,
+        [] { return false; }, &failure).has_value(), "native profile alias preserves the selected account cache binding");
     const auto retained = successful_page(next);
     require(retained.records.size() == 1 && retained.records[0].total_tokens == 30 && retained.incomplete_historical_coverage,
         "equivalent Windows profile spelling reloads required durable evidence across fresh scans");
+    const auto other = workspace.path / "OtherProfile";
+    fs::create_directories(other);
+    for (const bool change_account_key : {false, true}) {
+        auto foreign = next.context;
+        if (change_account_key) {
+            foreign.account_context->adapter_account_key = qwen::account_key(other);
+        }
+        else {
+            foreign.account_context->profile_path = qwen::path_string(other);
+        }
+        bool rejected = false;
+        try { (void)qwen::profile_for_context(foreign); }
+        catch (const std::runtime_error& error) {
+            rejected = std::string_view(error.what()) == "account_profile_mismatch";
+        }
+        require(rejected, "a different native profile cannot replace the selected account");
+    }
 #endif
 }
 
