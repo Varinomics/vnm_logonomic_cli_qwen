@@ -269,14 +269,6 @@ std::string read(const fs::path& path)
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
-void attach_seed(addon::Usage_scan_request& request, std::string_view contents, bool required)
-{
-    const auto path = addon::path_from_utf8(request.context.profile_storage->root) / "native-seed.jsonl";
-    write(path, contents);
-    request.native_file_cache = addon::Usage_native_file_cache{qwen::path_string(path),
-        addon::to_hex(addon::Sha256::digest(contents)), request.context.account_context->adapter_account_key, required};
-}
-
 addon::Usage_scan_page successful_page(const addon::Usage_scan_request& request, std::uint16_t version = 2)
 {
     const auto result = invoke(request, version);
@@ -516,7 +508,7 @@ void temporal_bounds_preserve_original_rows_and_copy_owners()
     require(capacity, "page boundary reduces optional proof without skipping the accounting cursor");
 }
 
-void required_empty_seed_refreshes_durable_history()
+void current_scans_refresh_durable_history()
 {
     Workspace workspace;
     auto request = request_for(workspace.path);
@@ -525,19 +517,16 @@ void required_empty_seed_refreshes_durable_history()
     write(source, summary("retained", 30));
     require(successful_page(request).records[0].total_tokens == 30 && fs::is_regular_file(cache),
         "first successful page already has durable session evidence");
-    attach_seed(request, "", true);
     write(source, summary("retained", 40));
     require(successful_page(request).records[0].total_tokens == 40,
-        "ordinary required empty seed continues updating after first scan");
+        "current scans continue updating durable evidence after first scan");
     fs::remove(source);
     const auto retained = successful_page(request); // New scan reads disk, never an in-memory continuation.
     require(retained.records.size() == 1 && retained.records[0].total_tokens == 40 && retained.incomplete_historical_coverage,
         "removed native history survives durable cache reload");
     request.mode = "reset";
-    request.native_file_cache.reset(); // The host omits its descriptor for reset.
     require(successful_page(request).records[0].total_tokens == 40, "reset mode is not permission to discard retained history");
     request.mode = "repair";
-    attach_seed(request, "", true);
     write(source, summary("retained", 5));
     require(successful_page(request).records[0].total_tokens == 5, "current same-session correction may reduce totals exactly");
     const auto accepted = read(cache);
@@ -546,31 +535,15 @@ void required_empty_seed_refreshes_durable_history()
     require(!invoke(request).result && read(cache) == accepted,
         "invalid replacement destination fails before publication without altering accepted evidence");
     fs::remove(pending);
-    request.native_file_cache->sha256_hex = std::string(64, '0');
-    require(invoke(request).failure == "native_cache_digest_mismatch" && read(cache) == accepted,
-        "digest failure cannot replace accepted evidence");
-    attach_seed(request, "", true);
-    request.native_file_cache->source_account_key = "foreign-account";
-    require(invoke(request).failure == "native_cache_account_mismatch" && read(cache) == accepted,
-        "foreign account seed cannot replace accepted evidence");
-    attach_seed(request, "{}\n", true);
-    require(invoke(request).failure == "native_cache_format_unsupported" && read(cache) == accepted,
-        "nonempty legacy evidence is explicitly unsupported, even with a valid digest");
-    attach_seed(request, "", true);
     write(cache, accepted.substr(0, accepted.size() / 2));
     const auto corrupt = invoke(request);
     require(!corrupt.result, "truncated required cache fails instead of rebuilding incomplete totals");
     write(cache, accepted);
     Workspace foreign;
     auto other = request_for(foreign.path);
-    attach_seed(other, "", true);
     const auto other_cache = addon::path_from_utf8(other.context.profile_storage->root) / "qwen-usage-v1/records";
     write(other_cache, accepted);
     require(invoke(other).failure == "usage_cache_owner_mismatch", "cache footer cannot confer another account's ownership");
-    fs::remove(cache);
-    require(invoke(request).failure == "native_cache_evidence_unavailable",
-        "lost required durable cache fails even if some current native history still exists");
-    write(cache, accepted);
     std::size_t files = 0;
     for (const auto& entry : fs::directory_iterator(cache.parent_path())) { (void)entry; ++files; }
     require(files == 2, "repeated scans and failures leave only accepted evidence and fixed lock");
@@ -590,7 +563,6 @@ void equivalent_windows_profile_spelling_reuses_cache()
     require(next.context.account_context->adapter_account_key == first.context.account_context->adapter_account_key,
         "Windows casing aliases have the same admitted account identity");
     next.context.profile_storage = first.context.profile_storage;
-    attach_seed(next, "", true);
     const auto retained = successful_page(next);
     require(retained.records.size() == 1 && retained.records[0].total_tokens == 30 && retained.incomplete_historical_coverage,
         "equivalent Windows profile spelling reloads required durable evidence across fresh scans");
@@ -691,7 +663,7 @@ int main()
         partial_sources_preserve_evidence_and_clean_corrections();
         forks_count_unique_calls_with_summaries_and_deleted_parents();
         copied_evidence_recovers_ancestry_without_parent_files();
-        required_empty_seed_refreshes_durable_history();
+        current_scans_refresh_durable_history();
         equivalent_windows_profile_spelling_reuses_cache();
         request_coverage_counts_errors_and_summary_requests();
         limits_cancel_before_publication();

@@ -1089,38 +1089,6 @@ std::string cache_owner(const addon::Usage_scan_request& request, const fs::path
         {"profile", Json(account_key(home))}}));
 }
 
-void validate_seed(const addon::Usage_scan_request& request, addon::Invocation_context& context)
-{
-    if (!request.native_file_cache) return;
-    const auto& seed = *request.native_file_cache;
-    const auto account = request.context.account_context ? request.context.account_context->adapter_account_key : std::string{};
-    if (seed.source_account_key != account) throw Usage_error("native_cache_account_mismatch");
-    const auto source = addon::path_from_utf8(seed.path);
-    const auto root = fs::canonical(addon::path_from_utf8(request.context.profile_storage->root));
-    const auto resolved = fs::canonical(source);
-    const auto relative = resolved.lexically_relative(root);
-    if (relative.empty() || relative.is_absolute() || *relative.begin() == "..") throw Usage_error("native_cache_path_invalid");
-    regular_or_absent(source);
-    std::ifstream input(source, std::ios::binary);
-    if (!input) throw Usage_error("native_cache_unavailable");
-    addon::Sha256 digest;
-    std::array<char, 65536> chunk{};
-    std::uint64_t bytes = 0;
-    while (input) {
-        check_cancel(context);
-        input.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
-        const auto count = static_cast<std::size_t>(input.gcount());
-        if (count > k_snapshot_bytes - bytes) throw Usage_error("native_cache_capacity");
-        bytes += count;
-        digest.update(chunk.data(), count);
-    }
-    if (input.bad()) throw Usage_error("native_cache_unavailable");
-    if (addon::to_hex(digest.finish()) != seed.sha256_hex) throw Usage_error("native_cache_digest_mismatch");
-    // Qwen has no pre-add-on native FILE_CACHE owner. Never interpret another
-    // provider's opaque retained wrappers as Qwen session evidence.
-    if (bytes != 0) throw Usage_error("native_cache_format_unsupported");
-}
-
 Json encode_event(std::string_view session, std::string_view uuid, const Event& event)
 {
     Json::Array values;
@@ -1756,11 +1724,8 @@ void collect_retained(const addon::Usage_scan_request& request, const fs::path& 
         storage_lock = std::make_unique<Storage_lock>(directory / "lock", context);
         inspect_storage(directory);
     }
-    validate_seed(request, context);
     const auto owner = cache_owner(request, home);
     auto retained = read_cache(input_file, owner, context);
-    if (!retained && request.native_file_cache && request.native_file_cache->cache_required)
-        throw Usage_error("native_cache_evidence_unavailable");
     Budget budget{Usage_limits{}};
     auto evidence = retained ? std::move(*retained) : Evidence{};
     Source_index source_index;
