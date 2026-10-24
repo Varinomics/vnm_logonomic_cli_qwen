@@ -56,6 +56,7 @@ function(qwen_target target)
 endfunction()
 
 add_library(qwen_provider STATIC
+    src/qwen_conversation.cpp
     src/qwen_accounts.cpp src/qwen_usage.cpp src/qwen_profile.cpp
     src/qwen_acp.cpp src/qwen_config.cpp src/qwen_launcher.cpp
     src/qwen_lifecycle.cpp src/qwen_preparation.cpp
@@ -91,6 +92,12 @@ if(LOGONOMIC_CLI_ADDON_EMBEDDED)
 endif()
 
 enable_testing()
+add_executable(qwen_conversation_tests tests/qwen_conversation_tests.cpp)
+target_link_libraries(qwen_conversation_tests PRIVATE qwen_provider)
+qwen_target(qwen_conversation_tests)
+add_test(NAME qwen_conversation_tests COMMAND qwen_conversation_tests)
+set_tests_properties(qwen_conversation_tests PROPERTIES TIMEOUT 30)
+
 add_executable(qwen_wake_tests tests/qwen_wake_tests.cpp)
 target_link_libraries(qwen_wake_tests PRIVATE qwen_provider)
 qwen_target(qwen_wake_tests)

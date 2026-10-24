@@ -1,6 +1,7 @@
 #include "qwen_accounts.h"
 #include "qwen_acp.h"
 #include "qwen_config.h"
+#include "qwen_conversation.h"
 #include "qwen_json.h"
 #include "qwen_launcher.h"
 #include "qwen_lifecycle.h"
@@ -9,6 +10,7 @@
 #include "qwen_usage.h"
 
 #include <logonomic_cli_addon/adapter_runtime.h>
+#include <logonomic_cli_addon/capability_ids.h>
 #include <logonomic_cli_addon/managed_configuration.h>
 #include <logonomic_cli_addon/profile_storage.h>
 #include <logonomic_cli_addon/session_contracts.h>
@@ -108,6 +110,10 @@ void invoke(addon::Invocation_context& context)
             qwen::handle_usage(context);
         }
         else
+        if (capability == addon::k_conversation_export_capability_id) {
+            addon::handle_conversation_export(context, qwen::export_conversation);
+        }
+        else
         if (capability == addon::k_attention_kind_capability_id && request.operation == addon::k_classify_event_operation) {
             addon::Contract_failure failure;
             const auto decoded = addon::decode_attention_classification_request(request.payload, &failure);
@@ -161,6 +167,7 @@ int main()
     options.adapter_version = "1.0.0";
     options.capabilities = {
         {"presentation", 1}, {"launcher-discovery", 1},
+        {addon::k_conversation_export_capability_id, addon::k_conversation_export_version},
         {"accounts", 2}, {"usage-scan", 3},
         {"usage-temporal", 1},
         {"profile-storage", 1},
