@@ -125,7 +125,7 @@ std::optional<Source_fingerprint> source_fingerprint(const fs::path& path)
     if (error) {
         return std::nullopt;
     }
-    return Source_fingerprint{bytes, std::to_string(modified.time_since_epoch().count()), {}};
+    return Source_fingerprint{bytes, addon::file_time_ticks_text(modified), {}};
 }
 
 bool same_source(const Source_fingerprint& left, const Source_fingerprint& right)
