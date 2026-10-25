@@ -644,7 +644,7 @@ void resume_policy(const char* executable)
 
 void account_names()
 {
-    // Oracle: accounts@1 names an account with a filesystem profile after the
+    // Oracle: accounts@2 names an account with a filesystem profile after the
     // profile's folder through the SDK's account_display_name.
 #ifdef _WIN32
     const std::string platform = "windows-x86_64";
