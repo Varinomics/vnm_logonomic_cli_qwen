@@ -15,6 +15,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace json_util = logonomic::cli_addon::json;
 
@@ -50,11 +51,72 @@ bool launcher_approval_contract()
         {"qwen -y --approval-mode=yolo", "direct", ""}, "linux-x86_64", undo}, rules);
     ok &= check(removed.disposition == changed && removed.script_body == "qwen",
         "Unyolofy removes all recognized Qwen bypass forms");
-    const std::string prompt = R"(qwen -p "--yolo" --approval-mode plan)";
+    const std::string prompt = R"(qwen --prompt="--yolo" --approval-mode plan)";
     const auto literal = addon::transform_launcher_approval({
         {prompt, "direct", ""}, "linux-x86_64", undo}, rules);
     ok &= check(literal.disposition == addon::Launcher_approval_disposition::UNCHANGED &&
-        literal.script_body == prompt, "Qwen prompt values and non-bypass policies survive Unyolofy");
+        literal.script_body == prompt, "Qwen attached prompt values and non-bypass policies survive Unyolofy");
+    // Oracle: the installed Qwen Code 0.24.3 yargs parser and its native option
+    // declarations: -p --yolo enables yolo, while --yolo false consumes false.
+    for (const auto* script : {
+            R"(qwen -p "--yolo")", R"(qwen -p "--yolo" --approval-mode plan)",
+            "qwen --yolo false", "qwen -y true", "qwen --sandbox false"})
+    {
+        for (const auto action : {yolo, undo}) {
+            const auto result = addon::transform_launcher_approval({
+                {script, "direct", ""}, "linux-x86_64", action}, rules);
+            const auto comparison = addon::launcher_approval_comparison_key({
+                {script, "direct", ""}, "linux-x86_64"}, rules);
+            ok &= check(result.disposition == addon::Launcher_approval_disposition::UNSUPPORTED &&
+                result.script_body.empty() && !comparison.supported,
+                "ambiguous native Qwen option operands are preserved as unsupported");
+        }
+    }
+    for (const auto* script : {"qwen false", "qwen --approval-mode yolo false"}) {
+        const auto result = addon::transform_launcher_approval({
+            {script, "direct", ""}, "linux-x86_64", yolo}, rules);
+        ok &= check(result.disposition == addon::Launcher_approval_disposition::UNSUPPORTED &&
+            result.script_body.empty(), "Yolofy cannot turn a Qwen positional prompt into a boolean operand");
+    }
+    for (const auto action : {yolo, undo}) {
+        const auto result = addon::transform_launcher_approval({
+            {"qwen --sandbox --approval-mode yolo false", "direct", ""}, "linux-x86_64", action}, rules);
+        ok &= check(result.disposition == addon::Launcher_approval_disposition::UNSUPPORTED &&
+            result.script_body.empty(), "approval editing cannot expose a Qwen prompt to another boolean flag");
+    }
+    const auto delimited = addon::transform_launcher_approval({
+        {"qwen -- false", "direct", ""}, "linux-x86_64", yolo}, rules);
+    ok &= check(delimited.disposition == changed && delimited.script_body == "qwen --yolo -- false",
+        "an explicit delimiter preserves the Qwen false prompt while enabling bypass");
+    // The same native parser leaves --resume valueless before --yolo, but
+    // consumes the positional session-id if approval editing removes that gap.
+    for (const auto* script : {"qwen --resume --yolo session-id", "qwen -r --yolo session-id"}) {
+        const auto result = addon::transform_launcher_approval({
+            {script, "direct", ""}, "linux-x86_64", undo}, rules);
+        ok &= check(result.disposition == addon::Launcher_approval_disposition::UNSUPPORTED &&
+            result.script_body.empty(), "Unyolofy cannot turn a Qwen positional into a resume selector");
+    }
+    for (const auto action : {yolo, undo}) {
+        const auto result = addon::transform_launcher_approval({
+            {"qwen --resume --approval-mode yolo session-id", "direct", ""}, "linux-x86_64", action}, rules);
+        ok &= check(result.disposition == addon::Launcher_approval_disposition::UNSUPPORTED &&
+            result.script_body.empty(), "replacing Qwen approval modes preserves resume operand ownership");
+    }
+    const auto plan_resume = addon::transform_launcher_approval({
+        {"qwen --resume --approval-mode plan session-id", "direct", ""}, "linux-x86_64", yolo}, rules);
+    ok &= check(plan_resume.disposition == addon::Launcher_approval_disposition::UNSUPPORTED &&
+        plan_resume.script_body.empty(), "Yolofy preserves a positional after a valueless Qwen resume option");
+    const std::pair<const char*, const char*> resume_cases[]{
+        {"qwen --resume --yolo -- session-id", "qwen --resume -- session-id"},
+        {"qwen --resume=session-id --yolo prompt", "qwen --resume=session-id prompt"},
+        {"qwen --resume session-id --yolo prompt", "qwen --resume session-id prompt"},
+    };
+    for (const auto& [before, after] : resume_cases) {
+        const auto result = addon::transform_launcher_approval({
+            {before, "direct", ""}, "linux-x86_64", undo}, rules);
+        ok &= check(result.disposition == changed && result.script_body == after,
+            "delimiters and bound Qwen resume values keep their native operand ownership");
+    }
     const auto unknown = addon::transform_launcher_approval({
         {"qwen --approval-mode future-mode", "direct", ""}, "linux-x86_64", yolo}, rules);
     ok &= check(unknown.disposition == addon::Launcher_approval_disposition::UNSUPPORTED,

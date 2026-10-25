@@ -26,6 +26,8 @@ const logonomic::cli_addon::Launcher_approval_rules& launcher_approval_rules()
             "update", "upgrade", "init", "serve", "daemon", "agents", "skills", "models",
             "help", "version", "completion", "worktree", "session",
         },
+        .value_arguments_consume_options = false,
+        .flag_arguments_consume_booleans = true,
     };
     return rules;
 }
