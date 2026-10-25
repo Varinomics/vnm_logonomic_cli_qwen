@@ -1,5 +1,6 @@
 #include "qwen_config.h"
 #include "qwen_launcher.h"
+#include "qwen_launcher_approval.h"
 #include "qwen_lifecycle.h"
 
 #include <logonomic_cli_addon/capability_ids.h>
@@ -27,6 +28,42 @@ bool check(bool condition, const char* message)
         std::cerr << message << '\n';
     }
     return condition;
+}
+
+bool launcher_approval_contract()
+{
+    const auto& rules = qwen::launcher_approval_rules();
+    const auto yolo = addon::Launcher_approval_action::YOLOFY;
+    const auto undo = addon::Launcher_approval_action::UNYOLOFY;
+    const auto changed = addon::Launcher_approval_disposition::CHANGED;
+    const auto windows = addon::transform_launcher_approval({
+        {"qwen", "direct", ""}, "windows-x86_64", yolo}, rules);
+    bool ok = check(windows.disposition == changed && windows.script_body == "qwen --yolo",
+        "discovered Windows Qwen launcher supports Yolofy");
+    for (const auto* policy : {"-y", "--approval-mode=yolo", "--approval-mode auto-edit"}) {
+        const auto result = addon::transform_launcher_approval({
+            {std::string("qwen ") + policy + " --model custom", "direct", ""}, "linux-x86_64", yolo}, rules);
+        ok &= check(result.disposition == changed && result.script_body == "qwen --yolo --model custom",
+            "Qwen aliases and conflicting approval modes converge without combining them");
+    }
+    const auto removed = addon::transform_launcher_approval({
+        {"qwen -y --approval-mode=yolo", "direct", ""}, "linux-x86_64", undo}, rules);
+    ok &= check(removed.disposition == changed && removed.script_body == "qwen",
+        "Unyolofy removes all recognized Qwen bypass forms");
+    const std::string prompt = R"(qwen -p "--yolo" --approval-mode plan)";
+    const auto literal = addon::transform_launcher_approval({
+        {prompt, "direct", ""}, "linux-x86_64", undo}, rules);
+    ok &= check(literal.disposition == addon::Launcher_approval_disposition::UNCHANGED &&
+        literal.script_body == prompt, "Qwen prompt values and non-bypass policies survive Unyolofy");
+    const auto unknown = addon::transform_launcher_approval({
+        {"qwen --approval-mode future-mode", "direct", ""}, "linux-x86_64", yolo}, rules);
+    ok &= check(unknown.disposition == addon::Launcher_approval_disposition::UNSUPPORTED,
+        "Qwen unknown approval modes are not rewritten");
+    const auto management = addon::transform_launcher_approval({
+        {"qwen mcp list", "direct", ""}, "linux-x86_64", yolo}, rules);
+    ok &= check(management.disposition == addon::Launcher_approval_disposition::UNSUPPORTED,
+        "Qwen management commands remain unchanged");
+    return ok;
 }
 
 bool settings_contract()
@@ -314,7 +351,8 @@ int main(int argc, char** argv)
     try {
         std::filesystem::create_directories(root);
         const auto package = addon::path_from_utf8(argv[1]);
-        result = settings_contract() && lifecycle_contract() && declared_profile_admits_every_shape(package) &&
+        result = launcher_approval_contract() && settings_contract() && lifecycle_contract() &&
+                declared_profile_admits_every_shape(package) &&
                 attention_contract(package, root)
             ? 0 : 1;
     }

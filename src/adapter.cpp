@@ -4,6 +4,7 @@
 #include "qwen_conversation.h"
 #include "qwen_json.h"
 #include "qwen_launcher.h"
+#include "qwen_launcher_approval.h"
 #include "qwen_lifecycle.h"
 #include "qwen_preparation.h"
 #include "qwen_session_wake.h"
@@ -86,6 +87,10 @@ void invoke(addon::Invocation_context& context)
         }
         const auto& request = context.request();
         const auto& capability = request.capability.capability_id;
+        if (capability == addon::k_launcher_approval_capability_id) {
+            addon::handle_launcher_approval(context, qwen::launcher_approval_rules());
+        }
+        else
         if (capability == "launcher-discovery") {
             discover(context);
         }
@@ -166,6 +171,7 @@ int main()
     options.adapter_name = "qwen-addon";
     options.adapter_version = "1.0.0";
     options.capabilities = {
+        {addon::k_launcher_approval_capability_id, addon::k_launcher_approval_version},
         {"presentation", 1}, {"launcher-discovery", 1},
         {addon::k_conversation_export_capability_id, addon::k_conversation_export_version},
         {"accounts", 2}, {"usage-scan", 3},
