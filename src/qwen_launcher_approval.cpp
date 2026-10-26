@@ -12,10 +12,12 @@ const logonomic::cli_addon::Launcher_approval_rules& launcher_approval_rules()
             {"--approval-mode", {"yolo"}, {"plan", "default", "auto-edit", "auto"}},
         },
         .conflicting_arguments = {},
+        // Native array options are omitted: removing an approval flag can make
+        // their values absorb a following prompt.
         .value_arguments = {
             "-m", "--model", "-p", "--prompt", "-i", "--prompt-interactive", "--output-format",
             "--input-format", "--system-prompt", "--append-system-prompt", "--output-style",
-            "--include-directories", "--allowed-tools", "--exclude-tools", "--openai-api-key",
+            "--openai-api-key",
             "--openai-base-url", "--max-session-turns", "--max-wall-time", "--max-tool-calls",
         },
         .optional_value_arguments = {"-r", "--resume"},

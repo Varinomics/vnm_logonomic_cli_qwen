@@ -157,6 +157,55 @@ bool launcher_approval_contract()
         ok &= check(result.disposition == changed && result.script_body == after,
             "delimiters and bound Qwen resume values keep their native operand ownership");
     }
+    // Qwen's native yargs arrays greedily absorb a positional prompt when an
+    // intervening approval option is removed, including attached/repeated values.
+    const std::pair<const char*, const char*> variadic_options[]{
+        {"--allowed-tools",       "run_shell_command"},
+        {"--include-directories", "src"},
+        {"--exclude-tools",       "run_shell_command"},
+    };
+    for (const auto& [option, value] : variadic_options) {
+        for (const auto& arguments : {
+                std::string(option) + " " + value,
+                std::string(option) + "=" + value,
+                std::string(option) + " " + value + " docs",
+                std::string(option) + " " + value + " " + option + " docs"})
+        {
+            for (const auto* policy : {"--yolo", "-y", "--approval-mode yolo", "--approval-mode plan"}) {
+                const std::string script = "qwen " + arguments + " " + policy + R"( "fix the tests")";
+                for (const auto* platform : {"windows-x86_64", "linux-x86_64"}) {
+                    for (const auto action : {yolo, undo}) {
+                        const addon::Launcher_approval_transform_request request{
+                            {script, "direct", ""}, platform, action};
+                        const auto result = addon::transform_launcher_approval(request, rules);
+                        const auto comparison = addon::launcher_approval_comparison_key({
+                            request.launcher, platform}, rules);
+                        const std::string message = "native variadic Qwen operands must remain unsupported: " +
+                            script + "; replacement: " + result.script_body;
+                        ok &= check(result.disposition == addon::Launcher_approval_disposition::UNSUPPORTED &&
+                                result.script_body.empty() && !comparison.supported &&
+                                request.launcher.script_body == script,
+                            message.c_str());
+                    }
+                }
+            }
+        }
+    }
+    const std::pair<const char*, const char*> scalar_cases[]{
+        {R"(qwen --model custom --yolo "fix the tests")", R"(qwen --model custom "fix the tests")"},
+        {R"(qwen --prompt "fix the tests" --yolo)", R"(qwen --prompt "fix the tests")"},
+        {R"(qwen --yolo -- --allowed-tools "fix the tests")", R"(qwen -- --allowed-tools "fix the tests")"},
+    };
+    for (const auto* platform : {"windows-x86_64", "linux-x86_64"}) {
+        for (const auto& [before, after] : scalar_cases) {
+            const auto result = addon::transform_launcher_approval({
+                {before, "direct", ""}, platform, undo}, rules);
+            const auto comparison = addon::launcher_approval_comparison_key({
+                {after, "direct", ""}, platform}, rules);
+            ok &= check(result.disposition == changed && result.script_body == after && comparison.supported,
+                "scalar values and delimited literal Qwen arguments retain safe approval edits");
+        }
+    }
     const auto unknown = addon::transform_launcher_approval({
         {"qwen --approval-mode future-mode", "direct", ""}, "linux-x86_64", yolo}, rules);
     ok &= check(unknown.disposition == addon::Launcher_approval_disposition::UNSUPPORTED,
