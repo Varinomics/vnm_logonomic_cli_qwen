@@ -21,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace json_util = logonomic::cli_addon::json;
 
@@ -79,12 +80,12 @@ bool launcher_approval_contract()
     const auto changed = addon::Launcher_approval_disposition::CHANGED;
     const auto windows = addon::transform_launcher_approval({
         {"qwen", "direct", ""}, "windows-x86_64", yolo}, rules);
-    bool ok = check(windows.disposition == changed && windows.script_body == "qwen --yolo",
+    bool ok = check(windows.disposition == changed && windows.script_body == "qwen --yolo=true",
         "discovered Windows Qwen launcher supports Yolofy");
     for (const auto* policy : {"-y", "--approval-mode=yolo", "--approval-mode auto-edit"}) {
         const auto result = addon::transform_launcher_approval({
             {std::string("qwen ") + policy + " --model custom", "direct", ""}, "linux-x86_64", yolo}, rules);
-        ok &= check(result.disposition == changed && result.script_body == "qwen --yolo --model custom",
+        ok &= check(result.disposition == changed && result.script_body == "qwen --yolo=true --model custom",
             "Qwen aliases and conflicting approval modes converge without combining them");
     }
     const auto removed = addon::transform_launcher_approval({
@@ -115,8 +116,8 @@ bool launcher_approval_contract()
     for (const auto* script : {"qwen false", "qwen --approval-mode yolo false"}) {
         const auto result = addon::transform_launcher_approval({
             {script, "direct", ""}, "linux-x86_64", yolo}, rules);
-        ok &= check(result.disposition == addon::Launcher_approval_disposition::UNSUPPORTED &&
-            result.script_body.empty(), "Yolofy cannot turn a Qwen positional prompt into a boolean operand");
+        ok &= check(result.disposition == changed && result.script_body == "qwen --yolo=true false",
+            "attached true preserves a Qwen positional boolean-looking prompt");
     }
     for (const auto action : {yolo, undo}) {
         const auto result = addon::transform_launcher_approval({
@@ -126,8 +127,8 @@ bool launcher_approval_contract()
     }
     const auto delimited = addon::transform_launcher_approval({
         {"qwen -- false", "direct", ""}, "linux-x86_64", yolo}, rules);
-    ok &= check(delimited.disposition == changed && delimited.script_body == "qwen --yolo -- false",
-        "an explicit delimiter preserves the Qwen false prompt while enabling bypass");
+    ok &= check(delimited.disposition == changed && delimited.script_body == "qwen --yolo=true -- false",
+        "an existing delimiter preserves Qwen literal tail operands while enabling bypass");
     // The same native parser leaves --resume valueless before --yolo, but
     // consumes the positional session-id if approval editing removes that gap.
     for (const auto* script : {"qwen --resume --yolo session-id", "qwen -r --yolo session-id"}) {
@@ -157,8 +158,8 @@ bool launcher_approval_contract()
         ok &= check(result.disposition == changed && result.script_body == after,
             "delimiters and bound Qwen resume values keep their native operand ownership");
     }
-    // Qwen's native yargs arrays greedily absorb a positional prompt when an
-    // intervening approval option is removed, including attached/repeated values.
+    // Native Qwen arrays remain greedy even when attached. Explicit false is
+    // omission-equivalent and retains the boundary before an implicit prompt.
     const std::pair<const char*, const char*> variadic_options[]{
         {"--allowed-tools",       "run_shell_command"},
         {"--include-directories", "src"},
@@ -166,6 +167,7 @@ bool launcher_approval_contract()
     };
     for (const auto& [option, value] : variadic_options) {
         for (const auto& arguments : {
+                std::string(option),
                 std::string(option) + " " + value,
                 std::string(option) + "=" + value,
                 std::string(option) + " " + value + " docs",
@@ -180,10 +182,21 @@ bool launcher_approval_contract()
                         const auto result = addon::transform_launcher_approval(request, rules);
                         const auto comparison = addon::launcher_approval_comparison_key({
                             request.launcher, platform}, rules);
-                        const std::string message = "native variadic Qwen operands must remain unsupported: " +
+                        const bool retained_plan = action == undo && std::string_view(policy) == "--approval-mode plan";
+                        const std::string expected = retained_plan ? script : "qwen " + arguments +
+                            (action == yolo ? " --yolo=true" : " --yolo=false") + R"( "fix the tests")";
+                        const auto again = addon::transform_launcher_approval({
+                            {expected, "direct", ""}, platform, action}, rules);
+                        const auto after_key = addon::launcher_approval_comparison_key({
+                            {expected, "direct", ""}, platform}, rules);
+                        const std::string message = "native variadic Qwen operands retain ownership: " +
                             script + "; replacement: " + result.script_body;
-                        ok &= check(result.disposition == addon::Launcher_approval_disposition::UNSUPPORTED &&
-                                result.script_body.empty() && !comparison.supported &&
+                        ok &= check(result.disposition == (retained_plan
+                                    ? addon::Launcher_approval_disposition::UNCHANGED : changed) &&
+                                result.script_body == expected && comparison.supported && after_key.supported &&
+                                comparison.key == after_key.key &&
+                                again.disposition == addon::Launcher_approval_disposition::UNCHANGED &&
+                                again.script_body == expected &&
                                 request.launcher.script_body == script,
                             message.c_str());
                     }
@@ -214,6 +227,94 @@ bool launcher_approval_contract()
         {"qwen mcp list", "direct", ""}, "linux-x86_64", yolo}, rules);
     ok &= check(management.disposition == addon::Launcher_approval_disposition::UNSUPPORTED,
         "Qwen management commands remain unchanged");
+    return ok;
+}
+
+bool packaged_launcher_approval(const std::filesystem::path& package, const std::filesystem::path& root)
+{
+    addon::Simulator_options options;
+    options.package_directory = package;
+    options.scratch_directory = root / "approval_scratch";
+    options.profile_storage_root = root / "approval_profiles";
+    addon::Host_simulator host(std::move(options), nullptr);
+    addon::Contract_failure failure;
+    if (!check(host.start(&failure), "approval package starts")) return false;
+    const auto invoke = [&](const char* operation, addon::Json_value payload) {
+        const auto id = host.invoke({addon::k_launcher_approval_capability_id, addon::k_launcher_approval_version},
+            operation, std::move(payload), 15000);
+        const auto outcome = host.wait_outcome(id, 18000);
+        if (!outcome || outcome->status != addon::Host_status::SUCCESS) {
+            throw std::runtime_error("packaged approval operation failed");
+        }
+        return outcome->payload;
+    };
+    const auto transform = [&](const addon::Launcher_request& launcher, addon::Launcher_approval_action action) {
+        const auto result = addon::decode_launcher_approval_transform_result(invoke(
+            addon::k_launcher_approval_transform_operation,
+            addon::encode_launcher_approval_transform_request({launcher, "windows-x86_64", action})), &failure);
+        if (!result) throw std::runtime_error("packaged approval result did not decode");
+        return *result;
+    };
+    const auto key = [&](const addon::Launcher_request& launcher) {
+        const auto result = addon::decode_launcher_approval_comparison_result(invoke(
+            addon::k_launcher_approval_comparison_operation,
+            addon::encode_launcher_approval_comparison_request({launcher, "windows-x86_64"})), &failure);
+        if (!result || !result->supported) throw std::runtime_error("packaged comparison was unsupported");
+        return result->key;
+    };
+    std::vector<std::string> scripts;
+    for (const auto* option : {"--allowed-tools", "--include-directories", "--exclude-tools"}) {
+        for (const auto& arguments : {
+                std::string(option), std::string(option) + " read_file", std::string(option) + " read_file docs",
+                std::string(option) + "=read_file", std::string(option) + " read_file " + option + "=docs",
+                std::string(option) + "=", std::string(option) + " \"read_file, docs\""})
+        {
+            scripts.push_back("qwen " + arguments + R"( --yolo "fix the tests")");
+        }
+    }
+    for (const auto* script : {
+            R"(qwen --allowed-tools read_file --approval-mode yolo "fix the tests")",
+            R"(qwen --allowed-tools read_file --approval-mode plan "fix the tests")",
+            R"(qwen --allowed-tools read_file --yolo --prompt "fix the tests")",
+            R"(qwen --allowed-tools read_file --yolo --model custom "fix the tests")",
+            R"(qwen --allowed-tools read_file --yolo -- "literal tail")",
+            "qwen --allowed-tools read_file --yolo", "qwen --allowed-tools read_file", "qwen --allowed-tools",
+            "qwen false", "qwen true", "qwen --allowed-tools read_file --approval-mode yolo false",
+            "qwen --allowed-tools read_file --yolo=false false", "qwen --yolo=true false"})
+    {
+        scripts.emplace_back(script);
+    }
+    bool ok = true;
+    for (const auto& script : scripts) {
+        for (const auto action : {addon::Launcher_approval_action::YOLOFY, addon::Launcher_approval_action::UNYOLOFY}) {
+            const addon::Launcher_request original{script, "direct", "QWEN_APPROVAL_FIXTURE=retained"};
+            const auto result = transform(original, action);
+            if (!check(result.disposition != addon::Launcher_approval_disposition::UNSUPPORTED,
+                    "ordinary native array/boolean forms support packaged approval edits")) return false;
+            auto edited = original;
+            edited.script_body = result.script_body;
+            const auto repeated = transform(edited, action);
+            ok &= check(repeated.disposition == addon::Launcher_approval_disposition::UNCHANGED &&
+                    repeated.script_body == result.script_body && key(original) == key(edited) &&
+                    original.script_body == script,
+                "packaged edits are idempotent and preserve saved-launcher comparison identity");
+            auto record = addon::Json_value::object();
+            record.set("action", addon::Json_value(action == addon::Launcher_approval_action::YOLOFY ? "yolofy" : "unyolofy"));
+            record.set("before", addon::Json_value(script));
+            record.set("after", addon::Json_value(result.script_body));
+            for (const auto& [name, text] : {std::pair{"before_argv", script}, {"after_argv", result.script_body}}) {
+                auto arguments = addon::Json_value::array();
+                for (const auto& argument : addon::literal_argv(text)) arguments.as_array().emplace_back(argument);
+                record.set(name, std::move(arguments));
+            }
+            std::cout << "QWEN_APPROVAL_NATIVE:" << addon::serialize_json(record) << '\n';
+        }
+    }
+    ok &= check(key({"qwen --allowed-tools read_file --yolo prompt", "direct", ""}) !=
+            key({"qwen --allowed-tools read_file prompt", "direct", ""}),
+        "comparison distinguishes an implicit prompt from the same text consumed by an array");
+    int exit_code = -1;
+    ok &= check(host.shutdown(3000, &exit_code) && exit_code == 0, "approval package shuts down cleanly");
     return ok;
 }
 
@@ -684,7 +785,8 @@ int main(int argc, char** argv)
     try {
         std::filesystem::create_directories(root);
         const auto package = addon::path_from_utf8(argv[1]);
-        result = launcher_approval_contract() && settings_contract() && lifecycle_contract() &&
+        result = launcher_approval_contract() && packaged_launcher_approval(package, root) &&
+                settings_contract() && lifecycle_contract() &&
                 declared_profile_admits_every_shape(package) &&
                 attention_contract(package, root) && context_contract(package, root)
             ? 0 : 1;

@@ -60,7 +60,9 @@ bool plain_session_options(const std::vector<std::string>& argv)
 {
     for (std::size_t index = 1; index < argv.size(); ++index) {
         const auto& option = argv[index];
-        if (option == "--debug" || option == "-d" || option == "--yolo" || option == "-y") {
+        if (option == "--debug" || option == "-d" || option == "--yolo" || option == "-y" ||
+            option == "--yolo=true" || option == "--yolo=false")
+        {
             continue;
         }
         if (option == "--model" || option == "-m" || option == "--approval-mode" ||

@@ -12,6 +12,7 @@
 #include <logonomic_cli_addon/accounts.h>
 #include <logonomic_cli_addon/host_simulator.h>
 #include <logonomic_cli_addon/launch_preparation.h>
+#include <logonomic_cli_addon/launcher_approval.h>
 #include <logonomic_cli_addon/launcher_discovery.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
@@ -176,7 +177,8 @@ void required_control_reaches_native_admission(const char* executable)
     require(!result->process.argv.empty() && result->process.argv.back() == "--acp" &&
         qwen::environment_value(result->process.environment, "QWEN_CODE_LEGACY_MCP_BLOCKING") == "1",
         "native ACP discovers the Task servers before it answers session/new");
-    for (const auto& options : std::vector<std::vector<std::string>>{{"--yolo"}, {"-y"}, {"--approval-mode", "default"},
+    for (const auto& options : std::vector<std::vector<std::string>>{{"--yolo"}, {"-y"}, {"--yolo=true"},
+            {"--yolo=false"}, {"--approval-mode", "default"},
             {"--approval-mode", "plan"}, {"--approval-mode", "auto-edit"}}) {
         auto selected = request;
         for (const auto& option : options) selected.context.launcher.script_body += " " + option;
@@ -535,6 +537,31 @@ void resume_policy(const char* executable)
             bare_resolution->adapter_account_key == request.context.account_context->adapter_account_key,
             "bare PowerShell Qwen must retain provider and account identity upstream");
         std::cout << "bare upstream provider=1 resolved=" << *bare_resolution->adapter_account_key << '\n';
+        const auto enabled = addon::decode_launcher_approval_transform_result(
+            invoke({addon::k_launcher_approval_capability_id, addon::k_launcher_approval_version},
+                addon::k_launcher_approval_transform_operation,
+                addon::encode_launcher_approval_transform_request({selected_launcher, environment.platform_id,
+                    addon::Launcher_approval_action::YOLOFY})), &failure);
+        require(enabled && enabled->script_body == "qwen --yolo=true",
+            "packaged Yolofy emits the native attached boolean spelling");
+        for (const auto* approval : {"--yolo=true", "--yolo=false"}) {
+            selected_launcher.script_body = std::string_view(approval) == "--yolo=true"
+                ? enabled->script_body : std::string("qwen ") + approval;
+            const auto recognized = addon::decode_recognize_result(
+                invoke({"launcher-discovery", 1}, "recognize",
+                    addon::encode_recognize_request(selected_launcher, ambient, environment.platform_id)), &failure);
+            addon::Prepare_request launch;
+            launch.launcher = selected_launcher;
+            launch.launcher_argv = {"powershell.exe", "-NoLogo", "-Command", selected_launcher.script_body};
+            launch.working_directory = addon::path_to_utf8(root);
+            launch.launch_environment = environment;
+            launch.account_context = request.context.account_context;
+            const auto prepared = addon::decode_launch_patch(
+                invoke({"launch-preparation", 3}, "prepare", addon::encode_prepare_request(launch, 3)), &failure, 3);
+            require(recognized && recognized->recognized && prepared && prepared->disposition &&
+                prepared->disposition->prepared,
+                "generated explicit approval spellings retain packaged PowerShell recognition and preparation");
+        }
         for (const auto& script : {
                 powershell_quote(addon::path_to_utf8(shims / "qwen.ps1")) + " --model selected-model",
                 std::string("qwen --model $env:SELECTED_MODEL"),
@@ -628,6 +655,10 @@ void resume_policy(const char* executable)
             "--openai-api-key", "fixture-auth", "--resume", session_id}, true);
     run_case("parenthesized approval", "qwen --approval-mode ('default')",
         {"--approval-mode", "default", "--resume", session_id}, true);
+    run_case("explicit bypass", "qwen --yolo=true",
+        {"--yolo=true", "--resume", session_id}, true);
+    run_case("explicit inactive bypass", "qwen --yolo=false",
+        {"--yolo=false", "--resume", session_id}, true);
     run_case("call operator", "& " + powershell_quote(addon::path_to_utf8(fake)) + " --model 'selected-model'",
         {"--model", "selected-model", "--resume", session_id}, false);
     run_case("call operator script", upstream_script,

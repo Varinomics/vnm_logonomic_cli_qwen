@@ -6,14 +6,12 @@ const logonomic::cli_addon::Launcher_approval_rules& launcher_approval_rules()
 {
     static const logonomic::cli_addon::Launcher_approval_rules rules{
         .program_names = {"qwen", "qwen.exe", "qwen.cmd", "qwen.bat", "qwen.ps1"},
-        .canonical_argument = "--yolo",
+        .canonical_argument = "--yolo=true",
         .bypass_arguments = {"--yolo", "-y"},
         .approval_modes = {
             {"--approval-mode", {"yolo"}, {"plan", "default", "auto-edit", "auto"}},
         },
         .conflicting_arguments = {},
-        // Native array options are omitted: removing an approval flag can make
-        // their values absorb a following prompt.
         .value_arguments = {
             "-m", "--model", "-p", "--prompt", "-i", "--prompt-interactive", "--output-format",
             "--input-format", "--system-prompt", "--append-system-prompt", "--output-style",
@@ -30,6 +28,12 @@ const logonomic::cli_addon::Launcher_approval_rules& launcher_approval_rules()
         },
         .value_arguments_consume_options = false,
         .flag_arguments_consume_booleans = true,
+        .variadic_arguments = {
+            {"--allowed-tools", false, false},
+            {"--include-directories", false, false},
+            {"--exclude-tools", false, false},
+        },
+        .inactive_bypass_argument = "--yolo=false",
     };
     return rules;
 }
