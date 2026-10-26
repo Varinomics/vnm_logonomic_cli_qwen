@@ -81,6 +81,13 @@ int main()
             body.set(key, qwen::Json(value));
         }
     }
+    if (event == "Stop") {
+        for (const auto* key : {"input_tokens", "context_limit"}) {
+            if (const auto* value = input->find(key); value && value->is_number()) {
+                body.set(key, *value);
+            }
+        }
+    }
     const auto delivery = addon::random_nonce_hex();
     body.set("event_id", qwen::Json(delivery));
     const auto nonce = addon::random_nonce_hex();

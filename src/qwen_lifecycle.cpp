@@ -1,9 +1,14 @@
 #include "qwen_lifecycle.h"
 #include "qwen_json.h"
 
+#include <logonomic_cli_addon/capability_ids.h>
+#include <logonomic_cli_addon/context_state.h>
 #include <logonomic_cli_addon/sha256.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -21,6 +26,21 @@ bool identity(std::string_view value)
         value.find('\0') == std::string_view::npos && addon::is_valid_utf8(value);
 }
 
+std::optional<std::uint64_t> context_tokens(const Json& body, std::string_view key, double minimum)
+{
+    const auto* value = body.find(key);
+    if (!value || !value->is_number()) {
+        return std::nullopt;
+    }
+    const double tokens = value->as_number();
+    if (!std::isfinite(tokens) || tokens < minimum || tokens > 9007199254740991.0 ||
+        std::floor(tokens) != tokens)
+    {
+        return std::nullopt;
+    }
+    return (std::uint64_t)tokens;
+}
+
 } // namespace
 
 addon::Classify_event_result classify_event(const addon::Classify_event_request& request)
@@ -30,6 +50,14 @@ addon::Classify_event_result classify_event(const addon::Classify_event_request&
     const auto session = json_util::text(body, "session_id");
     const auto agent = json_util::text(body, "agent_id");
     const auto& name = request.event.name;
+    if (request.context_failure) {
+        result.context_failure = addon::Context_failure{{}, *request.context_failure};
+        if (agent.empty() && identity(session) &&
+            std::none_of(session.begin(), session.end(), [](unsigned char byte) { return byte < 0x20; }))
+        {
+            result.context_failure->provider_session_id = session;
+        }
+    }
     if (!identity(session)) {
         result.lifecycle_degradation = addon::Lifecycle_degradation{};
         return result;
@@ -44,6 +72,30 @@ addon::Classify_event_result classify_event(const addon::Classify_event_request&
     if (!identity(observation.provider_event_id)) {
         result.lifecycle_degradation = addon::Lifecycle_degradation{1, session};
         return result;
+    }
+    if (request.context_state_version == addon::k_context_state_capability_version &&
+        request.ledger.current_transition &&
+        request.ledger.current_transition->provider_session_id == session)
+    {
+        const bool compacted = name == "SessionStart" && json_util::text(body, "source") == "compact";
+        if (name == "Stop" || compacted) {
+            addon::Context_update update;
+            update.provider_session_id = session;
+            update.event_id            = observation.provider_event_id;
+            update.compacted           = compacted;
+            if (name == "Stop") {
+                // Native Stop reports the current prompt and its configured
+                // capacity, independently of cumulative usage accounting.
+                update.used_tokens    = context_tokens(body, "input_tokens", 0);
+                update.context_window = context_tokens(body, "context_limit", 1);
+                if (!update.used_tokens || !update.context_window) {
+                    update.used_tokens.reset();
+                    update.context_window.reset();
+                    update.usage_unavailable = true;
+                }
+            }
+            result.context_updates.push_back(std::move(update));
+        }
     }
     const auto turn = json_util::text(body, "prompt_id");
     if (!turn.empty() && identity(turn)) {
@@ -105,14 +157,17 @@ addon::Classify_event_result classify_event(const addon::Classify_event_request&
             observation.attention_evidence = addon::Evidence::INFERRED;
         }
         else {
-            return {};
+            result.classification = addon::Classification::IGNORED;
+            return result;
         }
     }
     addon::Contract_failure failure;
     if (!addon::decode_lifecycle_observation(addon::encode_lifecycle_observation(observation),
             &failure, addon::Lifecycle_observation_policy::HELPER_INGRESS))
     {
+        auto context_failure = std::move(result.context_failure);
         result = {};
+        result.context_failure = std::move(context_failure);
         result.lifecycle_degradation = addon::Lifecycle_degradation{1, session};
         return result;
     }

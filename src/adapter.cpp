@@ -179,6 +179,7 @@ int main()
         {"profile-storage", 1},
         {"launch-preparation", 3}, {"managed-configuration", 2}, {"helper-ingress", 2},
         {"lifecycle-events", 2}, {"coordination-delivery", 1},
+        {addon::k_context_state_capability_id, addon::k_context_state_capability_version},
         {"session-wake", 1},
         {"model-context-delivery", 1},
         {addon::k_attention_kind_capability_id, addon::k_attention_kind_version},

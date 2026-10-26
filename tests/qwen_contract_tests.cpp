@@ -4,6 +4,7 @@
 #include "qwen_lifecycle.h"
 
 #include <logonomic_cli_addon/capability_ids.h>
+#include <logonomic_cli_addon/context_state.h>
 #include <logonomic_cli_addon/host_simulator.h>
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/lifecycle_events.h>
@@ -11,10 +12,14 @@
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/sidecar.h>
 
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace json_util = logonomic::cli_addon::json;
@@ -29,6 +34,41 @@ bool check(bool condition, const char* message)
         std::cerr << message << '\n';
     }
     return condition;
+}
+
+int helper_transport_fixture(int argc, char** argv)
+{
+    const auto capture_path = qwen::environment_value(addon::current_process_environment(), "QWEN_TEST_HELPER_CAPTURE");
+    if (capture_path.empty()) {
+        return 2;
+    }
+    if (std::string_view(argv[1]) == "request-title-instruction") {
+        std::cout << R"({"accepted":false})" << '\n';
+        return 0;
+    }
+    if (argc < 3) {
+        return 2;
+    }
+    if (std::string_view(argv[2]) == "acknowledge") {
+        return 0;
+    }
+    if (std::string_view(argv[2]) != "deliver") {
+        return 2;
+    }
+    const std::string bytes{std::istreambuf_iterator<char>(std::cin), {}};
+    const auto capture = addon::path_from_utf8(capture_path);
+    const bool retry = std::filesystem::exists(capture);
+    std::ofstream output(capture, std::ios::binary | std::ios::app);
+    output << bytes << '\n';
+    output.close();
+    if (!output) {
+        return 2;
+    }
+    if (!retry) {
+        return 1;
+    }
+    std::cout << R"({"accepted":true,"epoch":1})" << '\n';
+    return 0;
 }
 
 bool launcher_approval_contract()
@@ -403,10 +443,192 @@ bool attention_contract(const std::filesystem::path& package, const std::filesys
     return ok;
 }
 
+bool context_contract(const std::filesystem::path& package, const std::filesystem::path& root)
+{
+    addon::Simulator_options options;
+    options.package_directory    = package;
+    options.scratch_directory    = root / "context_scratch";
+    options.profile_storage_root = root / "context_profiles";
+    addon::Host_simulator host(std::move(options), nullptr);
+    addon::Contract_failure failure;
+    if (!check(host.start(&failure), "context package starts")) {
+        return false;
+    }
+    const auto live = host.live_capabilities();
+    bool ok = check(std::find(live.begin(), live.end(), addon::Capability_pair{
+            addon::k_context_state_capability_id, addon::k_context_state_capability_version}) != live.end(),
+        "the packaged declaration and adapter handshake negotiate context-state@2");
+    const auto invoke = [
+            &host
+        ](
+            const addon::Json_value& payload)
+        {
+            const auto id = host.invoke({"helper-ingress", 2}, addon::k_classify_event_operation, payload, 15000);
+            const auto outcome = host.wait_outcome(id, 18000);
+            addon::Contract_failure failure;
+            const auto result = outcome && outcome->status == addon::Host_status::SUCCESS
+                ? addon::decode_classify_event_result(outcome->payload, &failure, 2) : std::nullopt;
+            if (!result) {
+                throw std::runtime_error("packaged context classification did not decode");
+            }
+            return *result;
+        };
+    addon::Classify_event_request request;
+    request.transition_nonce = std::string(32, 'a');
+    request.ledger.current_epoch = 1;
+    request.ledger.current_transition = addon::Ledger_transition{
+        addon::Transition_kind::START, "12345678-1234-4234-8234-123456789abc", std::string(32, 'b')};
+    request.event.name = "Stop";
+    // Native buildContextUsage uses the latest prompt count and current model
+    // capacity. The hook can still block Stop, so it supplies no success fact.
+    request.event.body = *addon::parse_json(R"({
+        "session_id":"12345678-1234-4234-8234-123456789abc",
+        "prompt_id":"12345678-1234-4234-8234-123456789abc########7",
+        "event_id":"stop-delivery",
+        "input_tokens":32000,
+        "context_limit":128000
+    })", {}, nullptr);
+    auto result = invoke(addon::encode_classify_event_request(request));
+    ok &= check(result.context_updates.empty() && !result.context_failure && result.observations.size() == 1,
+        "a host without context opt-in retains the ordinary lifecycle result");
+    request.context_state_version = addon::k_context_state_capability_version;
+    result = invoke(addon::encode_classify_event_request(request));
+    if (!check(result.context_updates.size() == 1 && !result.context_failure,
+            "native Stop yields one occupancy observation"))
+    {
+        return false;
+    }
+    const auto measured = result.context_updates.front();
+    ok &= check(measured.used_tokens == 32000 && measured.context_window == 128000 &&
+            !measured.compacted && !measured.compaction_count && !measured.compaction_count_revision &&
+            result.observations.size() == 1 &&
+            result.observations.front().outcome_transition == addon::Outcome_transition::NONE,
+        "Stop occupancy is independent of cumulative billing, compaction and turn success");
+    addon::Context_state state;
+    addon::apply_context_update(state, measured);
+    ok &= check(state.used_fraction == 0.25 && !state.compaction_count_complete,
+        "native occupancy applies without inventing complete compaction history");
+    auto unsupported = addon::encode_classify_event_request(request);
+    unsupported.set("context_state_version", qwen::Json("unsupported"));
+    result = invoke(unsupported);
+    ok &= check(result.context_updates.empty() && result.observations.size() == 1 && result.context_failure &&
+            result.context_failure->provider_session_id == measured.provider_session_id &&
+            result.context_failure->failure.reason_code == addon::reason::k_unsupported_version,
+        "an unsupported optional request retains its native source and valid lifecycle evidence");
+    auto notification = request;
+    notification.event.name = "Notification";
+    notification.event.body.set("notification_type", qwen::Json("auth_success"));
+    unsupported = addon::encode_classify_event_request(notification);
+    unsupported.set("context_state_version", qwen::Json("unsupported"));
+    result = invoke(unsupported);
+    ok &= check(result.classification == addon::Classification::IGNORED && result.observations.empty() &&
+            result.context_updates.empty() && result.context_failure &&
+            result.context_failure->provider_session_id == measured.provider_session_id &&
+            result.context_failure->failure.reason_code == addon::reason::k_unsupported_version,
+        "ignored native auth_success notifications retain an independent optional context error");
+    auto invalid_lifecycle = request;
+    invalid_lifecycle.event.name = "SessionEnd";
+    invalid_lifecycle.event.body.set("reason",
+        qwen::Json(std::string(addon::limits::k_max_lifecycle_label_bytes + 1, 'x')));
+    unsupported = addon::encode_classify_event_request(invalid_lifecycle);
+    unsupported.set("context_state_version", qwen::Json("unsupported"));
+    result = invoke(unsupported);
+    ok &= check(result.classification == addon::Classification::IGNORED && result.observations.empty() &&
+            result.lifecycle_degradation && result.context_failure &&
+            result.context_failure->provider_session_id == measured.provider_session_id &&
+            result.context_failure->failure.reason_code == addon::reason::k_unsupported_version,
+        "lifecycle validation loss does not erase the independent context error");
+    auto retired = request;
+    retired.event.body.set("session_id", qwen::Json("87654321-1234-4234-8234-123456789abc"));
+    unsupported = addon::encode_classify_event_request(retired);
+    unsupported.set("context_state_version", qwen::Json("unsupported"));
+    result = invoke(unsupported);
+    ok &= check(result.context_updates.empty() && result.observations.empty() && result.context_failure &&
+            result.context_failure->provider_session_id == "87654321-1234-4234-8234-123456789abc",
+        "a delayed request error retains the retired native source instead of borrowing the active ledger");
+    retired.event.body.erase("session_id");
+    unsupported = addon::encode_classify_event_request(retired);
+    unsupported.set("context_state_version", qwen::Json("unsupported"));
+    result = invoke(unsupported);
+    ok &= check(result.context_updates.empty() && result.context_failure &&
+            result.context_failure->provider_session_id.empty() &&
+            result.context_failure->failure.reason_code == addon::reason::k_unsupported_version,
+        "request errors without a native source cannot withdraw the active session's context");
+    for (const auto& invalid : {qwen::Json(-1), qwen::Json(0.5), qwen::Json("32000"),
+             qwen::Json(9007199254740992.0), qwen::Json()})
+    {
+        auto missing = request;
+        missing.event.body.set("input_tokens", invalid);
+        result = invoke(addon::encode_classify_event_request(missing));
+        ok &= check(result.context_updates.size() == 1 && result.context_updates.front().usage_unavailable &&
+                !result.context_updates.front().used_tokens && !result.context_updates.front().context_window &&
+                result.observations.size() == 1,
+            "malformed native occupancy clears its measurement without suppressing lifecycle evidence");
+    }
+    auto compact = request;
+    compact.event.name = "SessionStart";
+    compact.event.body = json_util::object({
+        {"session_id", qwen::Json(measured.provider_session_id)},
+        {"source", qwen::Json("compact")}, {"event_id", qwen::Json("compact-delivery")}});
+    result = invoke(addon::encode_classify_event_request(compact));
+    if (!check(result.classification == addon::Classification::IGNORED && result.observations.empty() &&
+            result.context_updates.size() == 1, "successful compact is context-only, not a new session"))
+    {
+        return false;
+    }
+    const auto compacted = result.context_updates.front();
+    ok &= check(compacted.compacted && !compacted.compaction_count && !compacted.compaction_count_revision,
+        "completed native compaction uses its event authority without a fabricated snapshot order");
+    addon::apply_context_update(state, compacted);
+    ok &= check(state.compaction_count == 1 && !state.compaction_count_complete && !state.used_fraction,
+        "completed compaction clears occupancy and leaves unobserved resumed history unknown");
+    addon::apply_context_update(state, measured);
+    const auto before_replay = state;
+    addon::apply_context_update(state, compacted);
+    ok &= check(state == before_replay, "redelivery after a later usage update neither recounts nor clears usage");
+    compact.event.body.set("event_id", qwen::Json("second-compact-delivery"));
+    result = invoke(addon::encode_classify_event_request(compact));
+    addon::apply_context_update(state, result.context_updates.front());
+    ok &= check(state.compaction_count == 2 && !state.compaction_count_complete,
+        "a distinct completed compaction increments once without claiming a complete baseline");
+    for (const auto* name : {"PreCompact", "StopFailure"}) {
+        auto attempt = request;
+        attempt.event.name = name;
+        ok &= check(invoke(addon::encode_classify_event_request(attempt)).context_updates.empty(),
+            "attempts and failures are not successful compactions or occupancy observations");
+    }
+    for (const auto& event : {request, compact}) {
+        auto other = event;
+        other.event.body.set("agent_id", qwen::Json("worker@team"));
+        ok &= check(invoke(addon::encode_classify_event_request(other)).context_updates.empty(),
+            "child telemetry cannot change the root context");
+        other = event;
+        other.event.body.set("session_id", qwen::Json("87654321-1234-4234-8234-123456789abc"));
+        ok &= check(invoke(addon::encode_classify_event_request(other)).context_updates.empty(),
+            "stale-session telemetry cannot change the active context");
+    }
+    auto next = request;
+    next.ledger.current_transition->provider_session_id = "87654321-1234-4234-8234-123456789abc";
+    next.event.body.set("session_id", qwen::Json(next.ledger.current_transition->provider_session_id));
+    result = invoke(addon::encode_classify_event_request(next));
+    addon::apply_context_update(state, result.context_updates.front());
+    ok &= check(state.provider_session_id == next.ledger.current_transition->provider_session_id &&
+            state.used_fraction == 0.25 && !state.compaction_count && state.compaction_event_ids.empty(),
+        "a new exact provider session resets prior compaction knowledge and replay identities");
+    int exit_code = -1;
+    ok &= check(host.shutdown(3000, &exit_code) && exit_code == 0, "context package shuts down cleanly");
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
+    if (argc > 1 && (std::string_view(argv[1]) == "provider-event" ||
+            std::string_view(argv[1]) == "request-title-instruction"))
+    {
+        return helper_transport_fixture(argc, argv);
+    }
     if (argc != 2) return 2;
     const auto root = std::filesystem::temp_directory_path() / ("qwen-attention-" + addon::random_nonce_hex());
     int result = 1;
@@ -415,7 +637,7 @@ int main(int argc, char** argv)
         const auto package = addon::path_from_utf8(argv[1]);
         result = launcher_approval_contract() && settings_contract() && lifecycle_contract() &&
                 declared_profile_admits_every_shape(package) &&
-                attention_contract(package, root)
+                attention_contract(package, root) && context_contract(package, root)
             ? 0 : 1;
     }
     catch (const std::exception& error) {
