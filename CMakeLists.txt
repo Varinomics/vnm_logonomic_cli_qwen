@@ -171,3 +171,8 @@ endif()
 # Contract and recipe tests must not be confused with real native qualification.
 get_directory_property(_provider_tests TESTS)
 set_property(TEST ${_provider_tests} APPEND PROPERTY LABELS "cli-addon;provider-contract")
+
+add_executable(qwen_error_boundary_tests tests/qwen_error_boundary_tests.cpp)
+target_link_libraries(qwen_error_boundary_tests PRIVATE qwen_provider logonomic_cli_addon_sdk::test_support)
+qwen_target(qwen_error_boundary_tests)
+add_test(NAME qwen_error_boundary_tests COMMAND qwen_error_boundary_tests)

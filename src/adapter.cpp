@@ -18,6 +18,7 @@
 
 #include <exception>
 #include <optional>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -156,7 +157,11 @@ void invoke(addon::Invocation_context& context)
             qwen::handle_preparation(context);
         }
     }
-    catch (const std::exception&) {
+    catch (const std::exception& error) {
+        if (std::string_view(error.what()) == "hooks_disabled_by_user") {
+            context.fail(addon::Result_status::FAILED, "hooks_disabled_by_user", "Qwen hooks are disabled.");
+            return;
+        }
         // Vendor errors can contain prompts, credentials or settings bytes.
         context.fail(addon::Result_status::FAILED, "qwen_operation_failed",
             "Qwen Code could not complete the requested operation.");
