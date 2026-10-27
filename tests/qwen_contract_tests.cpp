@@ -9,6 +9,7 @@
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/lifecycle_events.h>
 #include <logonomic_cli_addon/limits.h>
+#include <logonomic_cli_addon/managed_configuration.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/sidecar.h>
 
@@ -239,6 +240,14 @@ bool packaged_launcher_approval(const std::filesystem::path& package, const std:
     addon::Host_simulator host(std::move(options), nullptr);
     addon::Contract_failure failure;
     if (!check(host.start(&failure), "approval package starts")) return false;
+    const auto transform_id = host.invoke({"managed-configuration", 2}, "transform",
+        addon::encode_managed_configuration_transform_request({addon::random_nonce_hex(), true,
+            "{\"disableAllHooks\":true,\"private\":\"private-sentinel\"}"}), 15000);
+    const auto refused = host.wait_outcome(transform_id, 18000);
+    if (!check(refused && refused->status == addon::Host_status::FAILED &&
+            refused->reason_code == "hooks_disabled_by_user" &&
+            refused->message.find("private-sentinel") == std::string::npos,
+            "disabled hooks retain their safe reason without exposing settings")) return false;
     const auto invoke = [&](const char* operation, addon::Json_value payload) {
         const auto id = host.invoke({addon::k_launcher_approval_capability_id, addon::k_launcher_approval_version},
             operation, std::move(payload), 15000);
