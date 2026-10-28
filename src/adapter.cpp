@@ -178,6 +178,7 @@ int main()
         {"usage-temporal", 1},
         {"profile-storage", 1},
         {"launch-preparation", 3}, {"managed-configuration", 2}, {"helper-ingress", 2},
+        {addon::k_interactive_initial_prompt_capability_id, addon::k_interactive_initial_prompt_version},
         {"lifecycle-events", 2}, {"coordination-delivery", 1},
         {addon::k_context_state_capability_id, addon::k_context_state_capability_version},
         {"session-wake", 1},

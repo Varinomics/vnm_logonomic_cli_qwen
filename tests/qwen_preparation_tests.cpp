@@ -484,6 +484,21 @@ void resume_policy(const char* executable)
     const std::string upstream_script = "& " + powershell_quote(addon::path_to_utf8(shims / "qwen.ps1")) +
         " --model 'selected-model'";
     {
+        auto persistent = request;
+        persistent.context.launcher = {upstream_script, addon::k_runner_powershell, ""};
+        persistent.context.launcher_argv = {"powershell.exe", "-NoExit", "-NoLogo", "-Command", upstream_script};
+        Context persistent_context;
+        persistent_context.m_request = {"persistent-resume", {"interactive-resume", 2}, "prepare_resume",
+            addon::encode_resume_prepare_request(persistent, 2)};
+        qwen::handle_preparation(persistent_context);
+        const auto proposal = persistent_context.m_result
+            ? addon::decode_resume_prepare_result(*persistent_context.m_result, &failure, 2) : std::nullopt;
+        require(proposal &&
+            std::find(proposal->process.argv.begin(), proposal->process.argv.end(), "-NoExit") != proposal->process.argv.end() &&
+            !proposal->process.argv.back().ends_with("; exit $LASTEXITCODE"),
+            "resuming preserves an explicitly persistent PowerShell runner");
+    }
+    {
         addon::Simulator_options options;
         options.package_directory = fs::absolute(executable).parent_path() / "package" / "logonomic.cli.qwen";
         options.scratch_directory = root / "adapter-scratch";

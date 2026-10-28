@@ -35,6 +35,7 @@ struct Powershell_selection
     std::string program;
     std::vector<std::string> option_values;
     std::vector<std::string> argument_expressions;
+    bool no_exit = false;
 };
 
 std::optional<Powershell_selection> inspect_powershell_launcher(
@@ -44,8 +45,8 @@ std::optional<Powershell_selection> inspect_powershell_launcher(
 std::optional<Powershell_selection> inspect_powershell_launcher(
     const logonomic::cli_addon::Launcher_request& launcher, const Environment& environment,
     std::string_view working_directory, logonomic::cli_addon::Invocation_context& context);
-std::vector<std::string> powershell_resume_command(
-    const Powershell_selection& selection, std::string_view session);
+std::optional<std::vector<std::string>> powershell_session_command(
+    const Powershell_selection& selection, const std::vector<std::string>& arguments);
 #endif
 bool is_qwen_invocation(const std::vector<std::string>& argv);
 bool recognize_launcher(std::string_view script);
