@@ -617,6 +617,9 @@ bool context_contract(const std::filesystem::path& package, const std::filesyste
     bool ok = check(std::find(live.begin(), live.end(), addon::Capability_pair{
             addon::k_context_state_capability_id, addon::k_context_state_capability_version}) != live.end(),
         "the packaged declaration and adapter handshake negotiate context-state@2");
+    ok &= check(std::find(live.begin(), live.end(), addon::Capability_pair{
+            addon::k_interactive_initial_prompt_capability_id, addon::k_interactive_initial_prompt_version}) != live.end(),
+        "the packaged declaration and adapter handshake negotiate interactive-initial-prompt@1");
     const auto invoke = [
             &host
         ](

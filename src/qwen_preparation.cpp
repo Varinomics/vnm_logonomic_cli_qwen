@@ -17,7 +17,10 @@
 #include <optional>
 #include <regex>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace json_util = logonomic::cli_addon::json;
 
@@ -43,6 +46,132 @@ bool bootstrap_available(const std::optional<addon::Launch_environment>& environ
     return false;
 }
 
+bool verbatim_initial_prompt(std::string_view text)
+{
+    constexpr std::string_view bom = "\xEF\xBB\xBF";
+    if (addon::trim(text) != text || text.starts_with(bom) || text.ends_with(bom) ||
+        text.starts_with('/') || text == "exit" || text == "quit" || text == ":q" ||
+        text == ":q!" || text == ":wq" || text == ":wq!")
+    {
+        return false;
+    }
+    if (text.starts_with("?btw")) {
+        const auto remainder = text.substr(4);
+        if (remainder.empty() || addon::trim(remainder) != remainder || remainder.starts_with(bom)) {
+            return false;
+        }
+    }
+    // yargs strips matching surrounding quotes in the --option=value form.
+    if ((text.front() == '\'' || text.front() == '"') && text.back() == text.front()) {
+        return false;
+    }
+    // Native Qwen expands whitespace-prefixed @ references before submitting.
+    for (auto at = text.find('@'); at != std::string_view::npos; at = text.find('@', at + 1)) {
+        const auto before = text.substr(0, at);
+        if (before.empty() || addon::trim(before) != before || before.ends_with(bom)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool initial_prompt_options(const std::vector<std::string>& argv)
+{
+    if (!plain_session_options(argv)) {
+        return false;
+    }
+    for (std::size_t index = 1; index < argv.size(); ++index) {
+        const auto& option = argv[index];
+        if (option == "--model" || option == "-m" || option == "--approval-mode" ||
+            option == "--openai-api-key" || option == "--openai-base-url")
+        {
+            // yargs treats a leading dash as another option, even when a
+            // preceding single-value option has not received its operand.
+            if (argv[++index].starts_with('-')) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+#ifdef _WIN32
+bool powershell_initial_argument(std::string_view argument)
+{
+    for (const std::string_view quote : {"\"", "\xE2\x80\x98", "\xE2\x80\x99", "\xE2\x80\x9A", "\xE2\x80\x9B"}) {
+        if (argument.find(quote) != std::string_view::npos) {
+            return false;
+        }
+    }
+    return !argument.ends_with('\\');
+}
+#endif
+
+std::optional<std::vector<std::string>> initial_prompt_command(
+    const addon::Prepare_request& request,
+    const Environment& environment,
+    addon::Invocation_context& invocation)
+{
+    const auto& prompt = *request.initial_prompt;
+    const auto brief = addon::path_from_utf8(prompt.referenced_file);
+    const auto directory = brief.parent_path();
+    const auto directory_text = path_string(directory);
+    constexpr std::string_view bom = "\xEF\xBB\xBF";
+    if (!verbatim_initial_prompt(prompt.text) || directory == directory.root_path() ||
+        brief.lexically_normal() != brief || directory_text.find(',') != std::string::npos ||
+        addon::trim(directory_text) != directory_text || directory_text.starts_with(bom) ||
+        directory_text.ends_with(bom))
+    {
+        return std::nullopt;
+    }
+    const std::vector<std::string> additions{
+        "--include-directories", directory_text, "--prompt-interactive=" + prompt.text};
+#ifdef _WIN32
+    if (request.launcher.runner_key == addon::k_runner_powershell) {
+        const auto selected = inspect_powershell_launcher(request.launcher, request.launcher_argv,
+            environment, request.working_directory, invocation);
+        if (!selected || !initial_prompt_options(selected->option_values) ||
+            !powershell_initial_argument(prompt.text) || !powershell_initial_argument(additions[1]))
+        {
+            return std::nullopt;
+        }
+        auto checked = selected->option_values;
+        checked.insert(checked.end(), additions.begin(), additions.end());
+        if (!platform_command(checked, environment, request.working_directory) ||
+            !selected_program_supports(selected->program, environment, request.working_directory,
+                "--prompt-interactive", invocation) ||
+            !selected_program_supports(selected->program, environment, request.working_directory,
+                "--include-directories", invocation))
+        {
+            return std::nullopt;
+        }
+        return powershell_session_command(*selected, additions);
+    }
+#endif
+    auto command = selected_command(request.launcher, request.launcher_argv,
+        environment, request.working_directory);
+    if (!command || !initial_prompt_options(*command)) {
+        return std::nullopt;
+    }
+#ifdef _WIN32
+    const auto extension = lower(addon::path_from_utf8(command->front()).extension().string());
+    if ((extension == ".ps1" || extension == ".cmd" || extension == ".bat") &&
+        (!powershell_initial_argument(prompt.text) || !powershell_initial_argument(additions[1])))
+    {
+        return std::nullopt;
+    }
+#endif
+    if (!selected_program_supports(command->front(), environment, request.working_directory,
+            "--prompt-interactive", invocation) ||
+        !selected_program_supports(command->front(), environment, request.working_directory,
+            "--include-directories", invocation))
+    {
+        return std::nullopt;
+    }
+    command->insert(command->end(), additions.begin(), additions.end());
+    return platform_command(*command, environment, request.working_directory);
+}
+
 void prepare_launch(addon::Invocation_context& invocation)
 {
     addon::Contract_failure failure;
@@ -58,8 +187,23 @@ void prepare_launch(addon::Invocation_context& invocation)
     patch.profile_storage = request->profile_storage;
     patch.account_context = request->account_context;
     const auto environment = environment_pairs(request->launch_environment->effective_environment);
+    if (request->initial_prompt) {
+        patch.argv = initial_prompt_command(*request, environment, invocation);
+        if (!patch.argv) {
+            invocation.fail(invocation.cancel_requested()
+                    ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,
+                invocation.cancel_requested() ? "cancelled" : addon::reason::k_initial_prompt_unavailable);
+            return;
+        }
+        patch.initial_prompt = addon::Initial_prompt_acknowledgment{
+            addon::initial_prompt_text_digest_hex(request->initial_prompt->text)};
+    }
     const bool direct = request->launcher.runner_key == "direct";
     bool admitted = false;
+    if (request->initial_prompt) {
+        admitted = true;
+    }
+    else
     if (direct) {
         const auto selected = selected_command(request->launcher, request->launcher_argv,
             environment, request->working_directory);
@@ -105,6 +249,10 @@ void prepare_launch(addon::Invocation_context& invocation)
     // snapshot transform against that same declared target and a host CAS.
     patch.disposition = addon::Launch_disposition{true, true, true};
     patch.apply_managed_configuration = true;
+    if (request->initial_prompt && !addon::validate_launch_patch(patch, {}, {}, &failure)) {
+        invocation.fail(addon::Result_status::UNAVAILABLE, addon::reason::k_initial_prompt_unavailable);
+        return;
+    }
     invocation.succeed(addon::encode_launch_patch(patch, 3));
 }
 
@@ -256,7 +404,7 @@ void prepare_resume(addon::Invocation_context& invocation)
         if (selected_program_supports(powershell->program, profile.environment,
             request->context.working_directory, "--resume", invocation))
         {
-            command = powershell_resume_command(*powershell, session);
+            command = powershell_session_command(*powershell, {"--resume", session});
         }
     }
     else

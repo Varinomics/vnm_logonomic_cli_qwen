@@ -111,6 +111,28 @@ std::optional<addon::Launcher_candidate> discover_launcher(const addon::Discover
     return result;
 }
 
+#ifdef _WIN32
+namespace {
+
+bool cmd_arguments_fit(const std::vector<std::string>& command)
+{
+    // cmd.exe's 8191-character limit also applies after an npm batch shim
+    // expands its driver and entrypoint paths. Reserve their normal MAX_PATH
+    // allowance, as the Claude integration does. UTF-8 bytes bound UTF-16 units.
+    constexpr std::size_t k_cmd_line_characters   = 8191;
+    constexpr std::size_t k_cmd_program_allowance = 1024;
+    std::size_t characters = k_cmd_program_allowance;
+    for (auto argument = command.begin() + 1; argument != command.end(); ++argument) {
+        const auto kept = argument->find_last_not_of('\\');
+        characters += 3 + argument->size() +
+            (kept == std::string::npos ? argument->size() : argument->size() - kept - 1);
+    }
+    return characters <= k_cmd_line_characters;
+}
+
+} // namespace
+#endif
+
 std::optional<std::vector<std::string>> platform_command(
     const std::vector<std::string>& argv, const Environment& environment,
     std::string_view working_directory)
@@ -121,6 +143,9 @@ std::optional<std::vector<std::string>> platform_command(
 #ifdef _WIN32
     const auto extension = lower(addon::path_from_utf8(argv.front()).extension().string());
     if (extension == ".cmd" || extension == ".bat" || extension == ".ps1") {
+        if (extension != ".ps1" && !cmd_arguments_fit(argv)) {
+            return std::nullopt;
+        }
         const auto shell = resolve_program("powershell.exe", environment, working_directory);
         if (!shell || !native_image(*shell)) {
             return std::nullopt;
@@ -233,7 +258,11 @@ std::optional<Powershell_selection> inspect_powershell_launcher(
     if (argv != expected) {
         return std::nullopt;
     }
-    return inspect_powershell_launcher(launcher, environment, working_directory, context);
+    auto selection = inspect_powershell_launcher(launcher, environment, working_directory, context);
+    if (selection) {
+        selection->no_exit = argv.size() == 5;
+    }
+    return selection;
 }
 
 std::optional<Powershell_selection> inspect_powershell_launcher(
@@ -287,15 +316,33 @@ std::optional<Powershell_selection> inspect_powershell_launcher(
     return plain_session_options(selection.option_values) ? std::optional(std::move(selection)) : std::nullopt;
 }
 
-std::vector<std::string> powershell_resume_command(
-    const Powershell_selection& selection, std::string_view session)
+std::optional<std::vector<std::string>> powershell_session_command(
+    const Powershell_selection& selection, const std::vector<std::string>& arguments)
 {
+    const auto extension = lower(addon::path_from_utf8(selection.program).extension().string());
+    if (extension == ".cmd" || extension == ".bat") {
+        auto command = selection.option_values;
+        command.insert(command.end(), arguments.begin(), arguments.end());
+        if (!cmd_arguments_fit(command)) {
+            return std::nullopt;
+        }
+    }
     std::string script = "& " + powershell_quote(selection.program);
     for (const auto& expression : selection.argument_expressions) {
         script += " " + expression;
     }
-    script += " --resume " + powershell_quote(session) + "; exit $LASTEXITCODE";
-    return {selection.shell, "-NoLogo", "-Command", std::move(script)};
+    for (const auto& argument : arguments) {
+        script += " " + powershell_quote(argument);
+    }
+    if (!selection.no_exit) {
+        script += "; exit $LASTEXITCODE";
+    }
+    std::vector<std::string> command{selection.shell};
+    if (selection.no_exit) {
+        command.push_back("-NoExit");
+    }
+    command.insert(command.end(), {"-NoLogo", "-Command", std::move(script)});
+    return command;
 }
 #endif
 
@@ -356,7 +403,8 @@ bool selected_program_supports(
     {
         if ((option > 0 && help[option - 1] != ' ' && help[option - 1] != '\t') ||
             (option + required_option.size() < help.size() &&
-                std::isalnum(static_cast<unsigned char>(help[option + required_option.size()]))))
+                (std::isalnum(static_cast<unsigned char>(help[option + required_option.size()])) ||
+                    help[option + required_option.size()] == '-' || help[option + required_option.size()] == '_')))
         {
             continue;
         }
