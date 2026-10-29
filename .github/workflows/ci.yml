@@ -1,0 +1,15 @@
+name: Qwen Code add-on CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provider:
+    uses: Varinomics/logonomic/.github/workflows/cli-addon-provider.yml@master
+    with:
+      provider: qwen
+    secrets:
+      VARINOMICS_REPO_READ_TOKEN: ${{ secrets.VARINOMICS_REPO_READ_TOKEN }}
