@@ -7,6 +7,17 @@ permissions:
   contents: read
 
 jobs:
+  windows-launcher-diagnostic:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Inspect the failing Windows launcher analysis
+        shell: pwsh
+        run: python -B .github/scripts/diagnose_windows_launcher.py
+
   provider:
     uses: Varinomics/logonomic/.github/workflows/cli-addon-provider.yml@master
     with:

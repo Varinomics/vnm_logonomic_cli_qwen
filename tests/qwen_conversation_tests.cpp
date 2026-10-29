@@ -100,7 +100,9 @@ int main()
     // Oracle: Qwen ChatRecord and prepareTranscriptRecords: UUID fragments
     // accumulate parts, parentUuid selects the latest branch, forkedFrom is
     // audit metadata. Primary schema links: docs/conversation_export.md.
-    const auto root = fs::temp_directory_path() / ("qwen-conversation-" + addon::random_nonce_hex());
+    const auto scratch = fs::temp_directory_path() / ("qwen-conversation-" + addon::random_nonce_hex());
+    fs::create_directories(scratch);
+    const auto root = fs::canonical(scratch);
     const auto profile = root / "profile";
     const auto source = profile / "projects/project-a/chats/session-a.jsonl";
     const std::string body =
