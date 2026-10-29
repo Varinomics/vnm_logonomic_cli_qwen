@@ -517,9 +517,15 @@ void resume_policy(const char* executable)
             return outcome->payload;
         };
         addon::Launcher_request selected_launcher{upstream_script, addon::k_runner_powershell, ""};
-        const addon::Launcher_discovery_declaration declaration{{"QWEN_HOME", "SystemRoot"}};
+        const auto& sidecars = host.package()->sidecars;
+        const auto sidecar = std::find_if(sidecars.begin(), sidecars.end(), [](const auto& candidate) {
+            return candidate.capability_id == "launcher-discovery" && candidate.version == 1;
+        });
+        require(sidecar != sidecars.end(), "packaged launcher discovery must be declared");
+        const auto declaration = addon::decode_launcher_discovery_declaration(sidecar->payload, &failure);
+        require(declaration.has_value(), "packaged launcher discovery environment must be readable");
         const auto ambient = addon::ambient_view(qwen::environment_pairs(environment.effective_environment),
-            declaration, environment.platform_id);
+            *declaration, environment.platform_id);
         const auto recognition_payload = invoke({"launcher-discovery", 1}, "recognize",
             addon::encode_recognize_request(selected_launcher, ambient, environment.platform_id));
         const auto recognition = addon::decode_recognize_result(recognition_payload, &failure);
