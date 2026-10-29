@@ -28,6 +28,10 @@ analysis = re.search(r'k_powershell_analysis = R"PS\((.*?)\)PS";', source, re.S)
 for anchor, stage in (
     ('    $tokens = $null', 'parse'),
     ('    function LiteralValue($node)', 'parsed'),
+    ('    $head = $command.CommandElements[0]', 'head'),
+    ('    $headValue = LiteralValue $head', 'head-value'),
+    ('    $arguments = @()', 'arguments'),
+    ('        $arguments += [pscustomobject]', 'argument-value'),
     ('    $matches = @(Get-Command', 'resolve'),
     ('    if ($matches.Count', 'resolved'),
     ('    $json = ConvertTo-Json', 'serialize'),
@@ -44,9 +48,15 @@ with tempfile.TemporaryDirectory(prefix='qwen-launcher-diagnostic-') as scratch:
     preparation = "qwen --model 'selected-model' --approval-mode 'default'"
     initial = "& '" + str(fake).replace("'", "''") + "' --model 'chosen-model' --approval-mode ('plan')"
     commands = (
-        ('simple startup', "[Console]::Out.WriteLine('QWEN_STARTUP_READY')", (), ()),
-        ('simple startup without profiles', "[Console]::Out.WriteLine('QWEN_STARTUP_READY')", (), ('-NoProfile',)),
+        ('Select-Object', "[Console]::Out.WriteLine('QWEN_SELECT_STARTED'); "
+         "@('first','second') | Select-Object -Skip 1; [Console]::Out.WriteLine('QWEN_SELECT_READY')", (), ()),
+        ('explicit installed utility module', "[Console]::Out.WriteLine('QWEN_IMPORT_STARTED'); "
+         "Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1'); "
+         "[Console]::Out.WriteLine('QWEN_IMPORT_READY'); @('first','second') | Select-Object -Skip 1; "
+         "[Console]::Out.WriteLine((ConvertTo-Json -InputObject @{ready=$true} -Compress))", (), ()),
         ('preparation', "$SourceBase64='" + base64.b64encode(preparation.encode()).decode() + "'\n" + analysis, (), ()),
+        ('preparation with module path', "$SourceBase64='" + base64.b64encode(preparation.encode()).decode() +
+         "'\n" + analysis, ('PSModulePath',), ()),
         ('initial prompt', "$SourceBase64='" + base64.b64encode(initial.encode()).decode() + "'\n" + analysis,
          ('TEMP', 'TMP'), ()),
     )
