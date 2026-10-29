@@ -98,7 +98,9 @@ void initial_prompt_delivery(const fs::path& executable)
     environment.platform_id = addon::host_platform_id();
     environment.bootstrap = addon::Environment_bootstrap_evidence{home};
     environment.effective_environment.set("QWEN_HOME", addon::Json_value(home));
-    for (const auto* name : {"PATH", "SystemRoot", "SystemDrive", "PATHEXT", "ComSpec", "TEMP", "TMP"}) {
+    for (const auto* name : {"PATH", "SystemRoot", "SystemDrive", "PATHEXT", "ComSpec",
+            "PSModulePath", "TEMP", "TMP"})
+    {
         if (const auto* value = std::getenv(name)) {
             environment.effective_environment.set(name, addon::Json_value(value));
         }

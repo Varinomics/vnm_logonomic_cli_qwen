@@ -258,7 +258,7 @@ void launch_disposition(const char* executable)
     const auto home = addon::path_to_utf8(root / "selected");
     environment.effective_environment.set("PATH", addon::Json_value(
         addon::path_to_utf8(root) + ";" + (std::getenv("PATH") ? std::getenv("PATH") : "")));
-    for (const auto* name : {"SystemRoot", "SystemDrive", "PATHEXT", "ComSpec"}) {
+    for (const auto* name : {"SystemRoot", "SystemDrive", "PATHEXT", "ComSpec", "PSModulePath"}) {
         if (const auto* value = std::getenv(name)) {
             environment.effective_environment.set(name, addon::Json_value(value));
         }
@@ -323,10 +323,11 @@ void launch_disposition(const char* executable)
 void direct_launch_starts_selected_program(const char* executable)
 {
     namespace fs = std::filesystem;
-    const auto root = fs::temp_directory_path() / ("qwen-direct-" + addon::random_nonce_hex());
-    fs::create_directories(root / "bin");
-    fs::create_directories(root / "native");
-    fs::create_directories(root / "selected");
+    const auto scratch = fs::temp_directory_path() / ("qwen-direct-" + addon::random_nonce_hex());
+    fs::create_directories(scratch / "bin");
+    fs::create_directories(scratch / "native");
+    fs::create_directories(scratch / "selected");
+    const auto root = fs::canonical(scratch);
     struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{root};
     const auto fake = root / "native" / "qwen.exe";
     const auto home = addon::path_to_utf8(root / "selected");
@@ -342,7 +343,7 @@ void direct_launch_starts_selected_program(const char* executable)
     environment.effective_environment.set("QWEN_HOME", addon::Json_value(home));
     environment.effective_environment.set("PATH", addon::Json_value(
         addon::path_to_utf8(root / "bin") + ";" + (std::getenv("PATH") ? std::getenv("PATH") : "")));
-    for (const auto* name : {"SystemRoot", "SystemDrive", "PATHEXT", "ComSpec"}) {
+    for (const auto* name : {"SystemRoot", "SystemDrive", "PATHEXT", "ComSpec", "PSModulePath"}) {
         if (const auto* value = std::getenv(name)) {
             environment.effective_environment.set(name, addon::Json_value(value));
         }
@@ -394,8 +395,9 @@ void direct_launch_starts_selected_program(const char* executable)
 void resume_policy(const char* executable)
 {
     namespace fs = std::filesystem;
-    const auto root = fs::temp_directory_path() / ("qwen-resume-" + addon::random_nonce_hex());
-    fs::create_directories(root / "selected");
+    const auto scratch = fs::temp_directory_path() / ("qwen-resume-" + addon::random_nonce_hex());
+    fs::create_directories(scratch / "selected");
+    const auto root = fs::canonical(scratch);
     struct Cleanup { fs::path path; ~Cleanup() { std::error_code error; fs::remove_all(path, error); } } cleanup{root};
     const auto home = addon::path_to_utf8(root / "selected");
 #ifdef _WIN32
@@ -423,7 +425,7 @@ void resume_policy(const char* executable)
 #endif
     environment.effective_environment.set("QWEN_HOME", addon::Json_value(home));
     environment.effective_environment.set("OPENAI_API_KEY", addon::Json_value("frozen-fixture-key"));
-    for (const auto* name : {"SystemRoot", "SystemDrive", "PATH", "PATHEXT", "ComSpec"}) {
+    for (const auto* name : {"SystemRoot", "SystemDrive", "PATH", "PATHEXT", "ComSpec", "PSModulePath"}) {
         if (const auto* value = std::getenv(name)) {
             environment.effective_environment.set(name, addon::Json_value(value));
         }
