@@ -1,5 +1,7 @@
 # Qwen Code add-on for Logonomic
 
+[![CI](https://github.com/Varinomics/vnm_logonomic_cli_qwen/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/Varinomics/vnm_logonomic_cli_qwen/actions/workflows/ci.yml)
+
 Standalone C++20 add-on for Qwen Code on Windows/Linux x86-64 and macOS ARM64. It consumes
 only the public Logonomic CLI add-on SDK. Qwen Code is installed separately;
 this package does not install a CLI, log in, copy credentials, or call a paid API.
