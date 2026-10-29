@@ -25,24 +25,39 @@ def quote_argument(argument):
 
 source = Path('src/qwen_launcher.cpp').read_text(encoding='utf-8')
 analysis = re.search(r'k_powershell_analysis = R"PS\((.*?)\)PS";', source, re.S).group(1)
+for anchor, stage in (
+    ('    $tokens = $null', 'parse'),
+    ('    function LiteralValue($node)', 'parsed'),
+    ('    $matches = @(Get-Command', 'resolve'),
+    ('    if ($matches.Count', 'resolved'),
+    ('    $json = ConvertTo-Json', 'serialize'),
+):
+    if anchor not in analysis:
+        raise RuntimeError('The diagnostic anchor no longer matches the actual analysis.')
+    analysis = analysis.replace(anchor, "    [Console]::Out.WriteLine('QWEN_STAGE:" + stage + "')\n" + anchor)
+analysis = "[Console]::Out.WriteLine('QWEN_STAGE:started')\n" + analysis
 powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
 with tempfile.TemporaryDirectory(prefix='qwen-launcher-diagnostic-') as scratch:
     root = Path(scratch).resolve()
     fake = root / 'qwen.exe'
     shutil.copy2(Path(os.environ['SystemRoot']) / 'System32/cmd.exe', fake)
-    for name, body, extra_environment in (
-        ('preparation', "qwen --model 'selected-model' --approval-mode 'default'", ()),
-        ('initial prompt', "& '" + str(fake).replace("'", "''") +
-         "' --model 'chosen-model' --approval-mode ('plan')", ('TEMP', 'TMP')),
-    ):
+    preparation = "qwen --model 'selected-model' --approval-mode 'default'"
+    initial = "& '" + str(fake).replace("'", "''") + "' --model 'chosen-model' --approval-mode ('plan')"
+    commands = (
+        ('simple startup', "[Console]::Out.WriteLine('QWEN_STARTUP_READY')", (), ()),
+        ('simple startup without profiles', "[Console]::Out.WriteLine('QWEN_STARTUP_READY')", (), ('-NoProfile',)),
+        ('preparation', "$SourceBase64='" + base64.b64encode(preparation.encode()).decode() + "'\n" + analysis, (), ()),
+        ('initial prompt', "$SourceBase64='" + base64.b64encode(initial.encode()).decode() + "'\n" + analysis,
+         ('TEMP', 'TMP'), ()),
+    )
+    for name, command, extra_environment, extra_options in commands:
         environment = {key: os.environ[key] for key in
                        ('SystemRoot', 'SystemDrive', 'PATHEXT', 'ComSpec', *extra_environment)
                        if key in os.environ}
         environment['PATH'] = str(root) + ';' + os.environ['PATH']
         environment['QWEN_HOME'] = str(root)
-        command = "$SourceBase64='" + base64.b64encode(body.encode()).decode() + "'\n" + analysis
         arguments = ' '.join(quote_argument(value) for value in
-                             (str(powershell), '-NoLogo', '-NonInteractive', '-Command', command))
+                             (str(powershell), '-NoLogo', '-NonInteractive', *extra_options, '-Command', command))
         started = time.monotonic()
         try:
             result = subprocess.run(arguments, executable=powershell, stdin=subprocess.DEVNULL,
