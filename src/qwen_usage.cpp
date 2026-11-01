@@ -1704,6 +1704,7 @@ void handle_usage(addon::Invocation_context& context)
         }
         else {
             if (request->cursor) throw Usage_error("usage_cursor_invalid");
+            context.report_progress(0, std::nullopt);
             auto candidate = std::make_shared<Snapshot>();
             collect_retained(*request, profile.home, *candidate, context);
             candidate->owner = owner;
