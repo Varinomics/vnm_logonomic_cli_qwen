@@ -10,6 +10,7 @@
 #include <logonomic_cli_addon_test/invocation_context.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -173,10 +174,13 @@ void initial_prompt_delivery(const fs::path& executable)
     addon::Contract_failure failure;
     for (const auto& request : launches) {
         Context context;
+        fs::remove(root / "help-starts");
         const auto patch = prepare(request, context);
         require(patch && patch->argv && addon::validate_launch_patch(*patch, {}, {}, &failure) &&
             addon::validate_initial_prompt_acknowledgment(request.initial_prompt, *patch, &failure),
             "the host accepts the exact prompt digest and prepared interactive invocation");
+        require(fs::file_size(root / "help-starts") == 1,
+            "initial prompt preparation must start the selected program for --help exactly once");
         require(patch->account_context &&
             patch->account_context->adapter_account_key == request.account_context->adapter_account_key &&
             patch->account_context->profile_path == request.account_context->profile_path &&
@@ -239,6 +243,24 @@ void initial_prompt_delivery(const fs::path& executable)
         absent_option.launch_environment->effective_environment.set("QWEN_INITIAL_TEST_HELP", addon::Json_value(help));
         require_refusal(std::move(absent_option));
     }
+    fs::remove(root / "help-starts");
+    Context cancelled;
+    cancelled.m_cancelled = true;
+    try {
+        (void)prepare(direct, cancelled);
+    }
+    catch (const std::runtime_error& error) {
+        require(std::string_view(error.what()) == "cancelled", "pre-cancelled preparation lost the reason");
+    }
+    require(cancelled.m_failure_status == addon::Result_status::CANCELLED && !cancelled.m_result &&
+        !fs::exists(root / "help-starts"), "pre-cancelled preparation must stop before probing");
+#ifndef _WIN32
+    const auto modified = fs::last_write_time(fake);
+    auto changing_program = direct;
+    changing_program.launch_environment->effective_environment.set("QWEN_INITIAL_TEST_TOUCH", addon::Json_value("1"));
+    require_refusal(std::move(changing_program));
+    require(fs::last_write_time(fake) != modified, "the help fixture must actually change the selected program");
+#endif
     auto shell = direct;
     shell.launcher.runner_key = addon::k_runner_bash;
     shell.launcher_argv = {"bash", "-c", shell.launcher.script_body};
@@ -249,6 +271,13 @@ int run(const std::vector<std::string>& arguments)
 {
     if (qwen::base_name(arguments.front()) == "qwen") {
         if (arguments.size() == 2 && arguments[1] == "--help") {
+            std::ofstream("help-starts", std::ios::binary | std::ios::app).put('x');
+#ifndef _WIN32
+            if (std::getenv("QWEN_INITIAL_TEST_TOUCH")) {
+                const auto program = addon::path_from_utf8(arguments.front());
+                fs::last_write_time(program, fs::last_write_time(program) - std::chrono::seconds(5));
+            }
+#endif
             const char* help = std::getenv("QWEN_INITIAL_TEST_HELP");
             std::cout << (help ? help : "  --prompt-interactive <prompt>\n  --include-directories <dirs>\n");
             return 0;

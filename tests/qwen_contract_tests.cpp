@@ -11,6 +11,7 @@
 #include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/managed_configuration.h>
 #include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/session_contracts.h>
 #include <logonomic_cli_addon/sidecar.h>
 
 #include <algorithm>
@@ -231,7 +232,49 @@ bool launcher_approval_contract()
     return ok;
 }
 
-bool packaged_launcher_approval(const std::filesystem::path& package, const std::filesystem::path& root)
+bool resume_hook_failures(addon::Host_simulator& host, const std::filesystem::path& home)
+{
+    std::filesystem::create_directories(home);
+    addon::Resume_prepare_request request;
+    request.context.launcher = {"qwen", "direct", ""};
+    request.context.launcher_argv = {"qwen"};
+    request.context.working_directory = addon::path_to_utf8(home);
+    addon::Launch_environment environment;
+    environment.platform_id = addon::host_platform_id();
+    environment.bootstrap = addon::Environment_bootstrap_evidence{addon::path_to_utf8(home)};
+    request.context.launch_environment = environment;
+    request.resume_record.set("provider_session_id", qwen::Json("019933a1-6e43-7102-a520-b3c8294cc763"));
+    const auto expect = [&](addon::Host_status status, const char* reason) {
+        const auto id = host.invoke({"interactive-resume", 2}, "prepare_resume",
+            addon::encode_resume_prepare_request(request, 2), 15000);
+        const auto outcome = host.wait_outcome(id, 18000);
+        if (!outcome || outcome->status != status || outcome->reason_code != reason ||
+            outcome->message.find("private-sentinel") != std::string::npos)
+        {
+            std::cerr << "expected resume reason " << reason << ", got "
+                << (outcome ? outcome->reason_code : "no outcome") << '\n';
+            return false;
+        }
+        return true;
+    };
+
+    const auto settings = home / "settings.json";
+    // A directory at the settings path cannot be read as a regular file, even as root.
+    std::filesystem::create_directory(settings);
+    bool ok = expect(addon::Host_status::UNAVAILABLE, "managed_hooks_unavailable");
+    std::filesystem::remove(settings);
+    for (const auto* content : {R"({"private":"private-sentinel"})",
+            R"({"disableAllHooks":true,"private":"private-sentinel")"})
+    {
+        std::ofstream(settings, std::ios::binary) << content;
+        ok &= expect(addon::Host_status::UNAVAILABLE, "managed_hooks_unavailable");
+    }
+    std::ofstream(settings, std::ios::binary) << R"({"disableAllHooks":true,"private":"private-sentinel"})";
+    ok &= expect(addon::Host_status::FAILED, "hooks_disabled_by_user");
+    return ok;
+}
+
+bool packaged_settings_and_approval(const std::filesystem::path& package, const std::filesystem::path& root)
 {
     addon::Simulator_options options;
     options.package_directory = package;
@@ -248,6 +291,7 @@ bool packaged_launcher_approval(const std::filesystem::path& package, const std:
             refused->reason_code == "hooks_disabled_by_user" &&
             refused->message.find("private-sentinel") == std::string::npos,
             "disabled hooks retain their safe reason without exposing settings")) return false;
+    if (!resume_hook_failures(host, root / "resume-profile")) return false;
     const auto invoke = [&](const char* operation, addon::Json_value payload) {
         const auto id = host.invoke({addon::k_launcher_approval_capability_id, addon::k_launcher_approval_version},
             operation, std::move(payload), 15000);
@@ -797,7 +841,7 @@ int main(int argc, char** argv)
     try {
         std::filesystem::create_directories(root);
         const auto package = addon::path_from_utf8(argv[1]);
-        result = launcher_approval_contract() && packaged_launcher_approval(package, root) &&
+        result = launcher_approval_contract() && packaged_settings_and_approval(package, root) &&
                 settings_contract() && lifecycle_contract() &&
                 declared_profile_admits_every_shape(package) &&
                 attention_contract(package, root) && context_contract(package, root)
