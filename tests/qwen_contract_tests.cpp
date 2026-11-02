@@ -248,8 +248,10 @@ bool resume_hook_failures(addon::Host_simulator& host, const std::filesystem::pa
         const auto id = host.invoke({"interactive-resume", 2}, "prepare_resume",
             addon::encode_resume_prepare_request(request, 2), 15000);
         const auto outcome = host.wait_outcome(id, 18000);
+        const std::string_view message = status == addon::Host_status::FAILED
+            ? "Qwen hooks are disabled." : "";
         if (!outcome || outcome->status != status || outcome->reason_code != reason ||
-            outcome->message.find("private-sentinel") != std::string::npos)
+            outcome->message != message)
         {
             std::cerr << "expected resume reason " << reason << ", got "
                 << (outcome ? outcome->reason_code : "no outcome") << '\n';
@@ -259,17 +261,34 @@ bool resume_hook_failures(addon::Host_simulator& host, const std::filesystem::pa
     };
 
     const auto settings = home / "settings.json";
+    const auto write_settings = [
+            &settings
+        ](
+            std::string_view content)
+        {
+            std::ofstream output(settings, std::ios::binary);
+            output << content;
+            output.close();
+            if (!output) {
+                throw std::runtime_error("resume settings fixture could not be written");
+            }
+        };
+    bool ok = expect(addon::Host_status::UNAVAILABLE, "managed_hooks_unavailable");
     // A directory at the settings path cannot be read as a regular file, even as root.
     std::filesystem::create_directory(settings);
-    bool ok = expect(addon::Host_status::UNAVAILABLE, "managed_hooks_unavailable");
+    ok &= expect(addon::Host_status::UNAVAILABLE, "managed_hooks_unavailable");
     std::filesystem::remove(settings);
     for (const auto* content : {R"({"private":"private-sentinel"})",
             R"({"disableAllHooks":true,"private":"private-sentinel")"})
     {
-        std::ofstream(settings, std::ios::binary) << content;
+        write_settings(content);
         ok &= expect(addon::Host_status::UNAVAILABLE, "managed_hooks_unavailable");
     }
-    std::ofstream(settings, std::ios::binary) << R"({"disableAllHooks":true,"private":"private-sentinel"})";
+    write_settings(R"({"disableAllHooks":true,"private":"private-sentinel"})");
+    ok &= expect(addon::Host_status::FAILED, "hooks_disabled_by_user");
+    auto managed = qwen::parse_settings(qwen::updated_config(R"({"private":"private-sentinel"})"));
+    managed.set("disableAllHooks", qwen::Json(true));
+    write_settings(addon::serialize_json_canonical(managed));
     ok &= expect(addon::Host_status::FAILED, "hooks_disabled_by_user");
     return ok;
 }

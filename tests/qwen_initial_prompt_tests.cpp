@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -19,6 +20,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -27,6 +30,40 @@ namespace {
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
 using Context = addon::test::Throwing_invocation_context;
+
+class Cancel_after_probe_start final : public addon::Invocation_context
+{
+public:
+    Cancel_after_probe_start(Context& context, fs::path marker)
+    :
+        m_context(context),
+        m_marker(std::move(marker))
+    {}
+
+    const addon::Invoke_request& request() const override { return m_context.request(); }
+    bool cancel_requested() const override
+    {
+        std::error_code error;
+        const auto starts = fs::file_size(m_marker, error);
+        return !error && starts > 0;
+    }
+    bool wait_for_cancel(int timeout_ms) override
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+        return cancel_requested();
+    }
+    void report_progress(std::uint64_t, std::optional<std::uint64_t>, std::string) override {}
+    void succeed(addon::Json_value result) override { m_context.succeed(std::move(result)); }
+    void fail(addon::Result_status status, std::string reason, std::string message) override
+    {
+        m_context.fail(status, std::move(reason), std::move(message));
+    }
+    bool finished() const override { return m_context.finished(); }
+
+private:
+    Context& m_context;
+    fs::path m_marker;
+};
 
 void require(bool condition, const char* message)
 {
@@ -81,6 +118,27 @@ void require_refusal(addon::Prepare_request request)
         "an unavailable initial prompt must fail rather than start an ordinary session");
 }
 
+void delayed_preparation(addon::Prepare_request request, const fs::path& root)
+{
+    request.launch_environment->effective_environment.set("QWEN_INITIAL_TEST_HELP_DELAY", addon::Json_value("200"));
+    bool single_probe = true;
+    for (int sample = 1; sample <= 3; ++sample) {
+        fs::remove(root / "help-starts");
+        Context context;
+        const auto started = std::chrono::steady_clock::now();
+        const auto patch   = prepare(request, context);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started);
+        require(patch && patch->argv && patch->initial_prompt,
+            "delayed capability probing must complete initial-prompt preparation");
+        const auto starts = fs::file_size(root / "help-starts");
+        std::cout << "prepare sample=" << sample << " help_delay_ms=200 help_starts=" << starts
+            << " elapsed_us=" << elapsed.count() << '\n';
+        single_probe = single_probe && starts == 1;
+    }
+    require(single_probe, "each complete preparation must acquire help once for both required options");
+}
+
 void initial_prompt_delivery(const fs::path& executable)
 {
     // Oracle: interactive-initial-prompt@1 and Qwen's --prompt-interactive
@@ -121,6 +179,7 @@ void initial_prompt_delivery(const fs::path& executable)
     const std::string text = "Logonomic continuation: read the brief at " + addon::path_to_utf8(brief) +
         " before anything else and follow it; do not modify the project until the user confirms.";
     direct.initial_prompt = addon::Initial_prompt_request{text, addon::path_to_utf8(brief)};
+    delayed_preparation(direct, root);
     std::vector<addon::Prepare_request> launches{direct};
 #ifdef _WIN32
     auto powershell = direct;
@@ -254,6 +313,20 @@ void initial_prompt_delivery(const fs::path& executable)
     }
     require(cancelled.m_failure_status == addon::Result_status::CANCELLED && !cancelled.m_result &&
         !fs::exists(root / "help-starts"), "pre-cancelled preparation must stop before probing");
+    auto pending_probe = direct;
+    pending_probe.launch_environment->effective_environment.set("QWEN_INITIAL_TEST_WAIT", addon::Json_value("1"));
+    Context pending;
+    pending.m_request = {"initial", {"launch-preparation", 3}, "prepare", addon::encode_prepare_request(pending_probe)};
+    Cancel_after_probe_start after_start(pending, root / "help-starts");
+    try {
+        qwen::handle_preparation(after_start);
+    }
+    catch (const std::runtime_error& error) {
+        require(std::string_view(error.what()) == "cancelled", "active probe cancellation lost the reason");
+    }
+    require(pending.m_failure_status == addon::Result_status::CANCELLED && !pending.m_result &&
+        fs::file_size(root / "help-starts") == 1,
+        "cancelling an active help probe must stop preparation without a second start");
 #ifndef _WIN32
     const auto modified = fs::last_write_time(fake);
     auto changing_program = direct;
@@ -272,6 +345,15 @@ int run(const std::vector<std::string>& arguments)
     if (qwen::base_name(arguments.front()) == "qwen") {
         if (arguments.size() == 2 && arguments[1] == "--help") {
             std::ofstream("help-starts", std::ios::binary | std::ios::app).put('x');
+            if (const char* delay = std::getenv("QWEN_INITIAL_TEST_HELP_DELAY")) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(std::stoi(delay)));
+            }
+            if (std::getenv("QWEN_INITIAL_TEST_WAIT")) {
+                // Keep the probe live until its parent observes the start and cancels it.
+                for (;;) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+            }
 #ifndef _WIN32
             if (std::getenv("QWEN_INITIAL_TEST_TOUCH")) {
                 const auto program = addon::path_from_utf8(arguments.front());
