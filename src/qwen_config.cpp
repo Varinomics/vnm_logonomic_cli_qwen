@@ -242,7 +242,7 @@ std::string updated_config(std::string_view settings)
     const auto& root = document.value();
     const auto& disabled = json_util::member(root, "disableAllHooks");
     if (disabled.is_boolean() && disabled.as_boolean()) {
-        throw std::runtime_error("hooks_disabled_by_user");
+        throw Hooks_disabled_by_user();
     }
     auto members = document.members(document.skip(0));
     const auto found = std::find_if(members.begin(), members.end(), [](const auto& entry) {
@@ -294,6 +294,9 @@ bool has_managed_hooks(std::string_view settings)
 {
     try {
         return updated_config(settings) == settings;
+    }
+    catch (const Hooks_disabled_by_user&) {
+        throw;
     }
     catch (const std::exception&) {
         return false;
