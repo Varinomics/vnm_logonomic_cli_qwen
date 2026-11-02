@@ -85,7 +85,7 @@ void help_capabilities(const char* executable)
         }
         Context context;
         require(qwen::selected_program_supports(addon::path_to_utf8(fake), environment,
-            addon::path_to_utf8(root), "--resume", context) == supported,
+            addon::path_to_utf8(root), {"--resume"}, context) == supported,
             "help option declarations remain usable after inline mentions, without admitting unsupported tokens");
     }
 }

@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <optional>
 #include <regex>
 #include <stdexcept>
@@ -124,6 +125,7 @@ std::optional<std::vector<std::string>> initial_prompt_command(
     {
         return std::nullopt;
     }
+    const std::initializer_list<std::string_view> required_options{"--prompt-interactive", "--include-directories"};
     const std::vector<std::string> additions{
         "--include-directories", directory_text, "--prompt-interactive=" + prompt.text};
 #ifdef _WIN32
@@ -139,9 +141,7 @@ std::optional<std::vector<std::string>> initial_prompt_command(
         checked.insert(checked.end(), additions.begin(), additions.end());
         if (!platform_command(checked, environment, request.working_directory) ||
             !selected_program_supports(selected->program, environment, request.working_directory,
-                "--prompt-interactive", invocation) ||
-            !selected_program_supports(selected->program, environment, request.working_directory,
-                "--include-directories", invocation))
+                required_options, invocation))
         {
             return std::nullopt;
         }
@@ -162,9 +162,7 @@ std::optional<std::vector<std::string>> initial_prompt_command(
     }
 #endif
     if (!selected_program_supports(command->front(), environment, request.working_directory,
-            "--prompt-interactive", invocation) ||
-        !selected_program_supports(command->front(), environment, request.working_directory,
-            "--include-directories", invocation))
+            required_options, invocation))
     {
         return std::nullopt;
     }
@@ -402,7 +400,7 @@ void prepare_resume(addon::Invocation_context& invocation)
 #ifdef _WIN32
     if (powershell) {
         if (selected_program_supports(powershell->program, profile.environment,
-            request->context.working_directory, "--resume", invocation))
+            request->context.working_directory, {"--resume"}, invocation))
         {
             command = powershell_session_command(*powershell, {"--resume", session});
         }

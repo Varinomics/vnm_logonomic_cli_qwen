@@ -370,9 +370,30 @@ std::optional<std::vector<std::string>> selected_command(
     return command;
 }
 
+namespace {
+
+bool help_declares_option(std::string_view help, std::string_view required_option)
+{
+    for (auto option = help.find(required_option); option != std::string::npos;
+         option = help.find(required_option, option + 1))
+    {
+        if ((option > 0 && help[option - 1] != ' ' && help[option - 1] != '\t') ||
+            (option + required_option.size() < help.size() &&
+                (std::isalnum(static_cast<unsigned char>(help[option + required_option.size()])) ||
+                    help[option + required_option.size()] == '-' || help[option + required_option.size()] == '_')))
+        {
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
 bool selected_program_supports(
     std::string_view program, const Environment& environment,
-    std::string_view working_directory, std::string_view required_option,
+    std::string_view working_directory, std::initializer_list<std::string_view> required_options,
     addon::Invocation_context& context)
 {
     const auto selected = addon::path_from_utf8(program);
@@ -398,19 +419,8 @@ bool selected_program_supports(
     // Capability evidence comes from the selected executable, never a ceiling
     // on a moving vendor release number.
     const std::string help = output->output + '\n' + output->errors;
-    for (auto option = help.find(required_option); option != std::string::npos;
-         option = help.find(required_option, option + 1))
-    {
-        if ((option > 0 && help[option - 1] != ' ' && help[option - 1] != '\t') ||
-            (option + required_option.size() < help.size() &&
-                (std::isalnum(static_cast<unsigned char>(help[option + required_option.size()])) ||
-                    help[option + required_option.size()] == '-' || help[option + required_option.size()] == '_')))
-        {
-            continue;
-        }
-        return true;
-    }
-    return false;
+    return std::all_of(required_options.begin(), required_options.end(),
+        [&help](std::string_view option) { return help_declares_option(help, option); });
 }
 
 std::optional<std::vector<std::string>> verified_command(
@@ -420,7 +430,7 @@ std::optional<std::vector<std::string>> verified_command(
 {
     auto command = selected_command(launcher, argv, environment, working_directory);
     if (!command || !selected_program_supports(command->front(), environment,
-        working_directory, required_option, context))
+        working_directory, {required_option}, context))
     {
         return std::nullopt;
     }

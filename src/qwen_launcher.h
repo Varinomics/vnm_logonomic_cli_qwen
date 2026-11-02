@@ -5,6 +5,7 @@
 #include <logonomic_cli_addon/launcher_utilities.h>
 
 #include <filesystem>
+#include <initializer_list>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -70,7 +71,7 @@ std::optional<std::vector<std::string>> verified_command(
     logonomic::cli_addon::Invocation_context& context);
 bool selected_program_supports(
     std::string_view program, const Environment& environment,
-    std::string_view working_directory, std::string_view required_option,
+    std::string_view working_directory, std::initializer_list<std::string_view> required_options,
     logonomic::cli_addon::Invocation_context& context);
 std::optional<std::vector<std::string>> platform_command(
     const std::vector<std::string>& argv, const Environment& environment,
