@@ -21,7 +21,7 @@ std::string account_key(const fs::path& home)
 {
     auto normalized = fs::absolute(home).lexically_normal();
 #ifdef _WIN32
-    const auto source = normalized.native();
+    const auto& source = normalized.native();
     const int count = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, source.data(),
         static_cast<int>(source.size()), nullptr, 0, nullptr, nullptr, 0);
     if (count <= 0) throw std::runtime_error("qwen_profile_normalization_failed");

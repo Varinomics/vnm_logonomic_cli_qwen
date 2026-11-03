@@ -230,7 +230,9 @@ bool valid_standard_notification(
     }
     if (type == "agent_message_chunk" || type == "agent_thought_chunk" || type == "user_message_chunk") {
         if (stage != "await_prompt" || !valid_text_update(update)) return false;
-        if (type == "agent_message_chunk") output += json_util::text(json_util::member(update, "content"), "text");
+        if (type == "agent_message_chunk") {
+            output += json_util::member(json_util::member(update, "content"), "text").as_string();
+        }
         return output.size() <= k_result_limit;
     }
     if (type == "tool_call" || type == "tool_call_update") return stage == "await_prompt" && valid_tool(update);
