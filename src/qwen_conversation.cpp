@@ -101,10 +101,10 @@ bool append_part(const Json& part, std::vector<Block>& blocks, addon::Contract_f
     if (const auto& response = json::member(part, "functionResponse"); response.is_object()) {
         const auto& content = json::member(response, "response");
         const auto& output = json::member(content, "output");
-        const auto text = output.is_string() && content.as_object().size() == 1 ? output.as_string()
+        auto text = output.is_string() && content.as_object().size() == 1 ? output.as_string()
             : content.is_string() ? content.as_string() : addon::serialize_json(content);
         blocks.push_back({Kind::TOOL_RESULT,
-            text,
+            std::move(text),
             json::text(response, "name") + " " + json::text(response, "id"), false});
     }
     else
@@ -113,11 +113,11 @@ bool append_part(const Json& part, std::vector<Block>& blocks, addon::Contract_f
     }
     else
     if (const auto& data = json::member(part, "fileData"); data.is_object()) {
-        const auto uri = json::text(data, "fileUri");
+        auto uri = json::text(data, "fileUri");
         if (uri.empty()) {
             return fail(failure, "conversation_content_invalid", "A Qwen attachment has no file reference.");
         }
-        blocks.push_back({Kind::ATTACHMENT, uri, json::text(data, "mimeType")});
+        blocks.push_back({Kind::ATTACHMENT, std::move(uri), json::text(data, "mimeType")});
     }
     else
     if (const auto& code = json::member(part, "executableCode"); code.is_object()) {
