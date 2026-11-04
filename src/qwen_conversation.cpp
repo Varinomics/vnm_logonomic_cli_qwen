@@ -57,8 +57,10 @@ std::optional<fs::path> source_file(const fs::path& home, std::string_view id,
 {
     std::optional<fs::path> source;
     const auto projects = home / "projects";
-    if (fs::is_directory(projects)) {
-        const auto name = std::string(id) + ".jsonl";
+    // The request decoder validates text; lookup must also stay within one
+    // filename component, including on Windows (drive and stream syntax).
+    if (id.find_first_of("/\\:") == std::string_view::npos && fs::is_directory(projects)) {
+        const auto name = addon::path_from_utf8(std::string(id) + ".jsonl");
         for (const auto& project : fs::directory_iterator(projects)) {
             if (cancelled && cancelled()) {
                 fail(failure, "cancelled", "Conversation extraction was cancelled.");
@@ -68,16 +70,15 @@ std::optional<fs::path> source_file(const fs::path& home, std::string_view id,
             if (!fs::is_directory(chats)) {
                 continue;
             }
-            for (const auto& entry : fs::directory_iterator(chats)) {
-                if (addon::path_to_utf8(entry.path().filename()) != name || !entry.is_regular_file()) {
-                    continue;
-                }
-                if (source) {
-                    fail(failure, "conversation_source_ambiguous", "Several native files name this Qwen conversation.");
-                    return {};
-                }
-                source = entry.path();
+            const auto candidate = chats / name;
+            if (!fs::is_regular_file(candidate)) {
+                continue;
             }
+            if (source) {
+                fail(failure, "conversation_source_ambiguous", "Several native files name this Qwen conversation.");
+                return {};
+            }
+            source = candidate;
         }
     }
     if (!source) {

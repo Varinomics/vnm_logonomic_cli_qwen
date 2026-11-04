@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <string>
@@ -90,6 +91,117 @@ bool compact_projection(const fs::path& root, const fs::path& source,
             }
         }
     }
+    return ok;
+}
+
+bool source_lookup(const fs::path& root, addon::Conversation_export_request request)
+{
+    const auto profile = root / "lookup-profile";
+    const auto project = profile / "projects/project-a" / "chats";
+    const auto other   = profile / "projects/project-b" / "chats";
+    const auto source  = project / "session-a.jsonl";
+    request.launch_environment.bootstrap = addon::Environment_bootstrap_evidence{addon::path_to_utf8(profile)};
+    request.output_directory = addon::path_to_utf8(root / "lookup-output");
+    const auto write_session = [](
+            const fs::path& path,
+            std::string_view id)
+        {
+            write(path, R"({"type":"user","uuid":"prompt","parentUuid":null,"sessionId":)" +
+                addon::serialize_json(addon::Json_value(std::string(id))) + "," +
+                R"("message":{"role":"user","parts":[{"text":"Lookup content"}]}})" "\n");
+        };
+
+    addon::Contract_failure failure;
+    const auto extract = [
+            &
+        ](
+            const std::function<bool()>& cancelled = {})
+        {
+            const auto output = addon::path_from_utf8(request.output_directory);
+            fs::remove_all(output);
+            fs::create_directories(output);
+            return qwen::export_conversation(request, cancelled, &failure);
+        };
+    bool ok = check(!extract() &&
+        failure.reason_code == "conversation_source_unavailable", "missing history is unavailable");
+    write_session(source, "session-a");
+    fs::create_directories(other);
+    ok &= check(extract().has_value(),
+        "a known transcript is found among projects without matching files");
+
+    write_session(project.parent_path() / "session-a.jsonl", "../session-a");
+    write_session(project / "nested/session-a.jsonl", "nested/session-a");
+    for (const auto* invalid : {"../session-a", "nested/session-a", "nested\\session-a",
+             "C:session-a", "session-a:stream"})
+    {
+        request.provider_session_id = invalid;
+        ok &= check(!extract() &&
+            failure.reason_code == "conversation_source_unavailable",
+            "a session identity cannot select a path, drive or stream");
+    }
+    const auto absolute = addon::path_to_utf8(root / "absolute-session");
+    write_session(addon::path_from_utf8(absolute + ".jsonl"), absolute);
+    request.provider_session_id = absolute;
+    ok &= check(!extract() &&
+        failure.reason_code == "conversation_source_unavailable", "absolute session paths are refused");
+
+    request.provider_session_id = "session-a";
+    unsigned cancellation_checks = 0;
+    ok &= check(!extract([&] { return ++cancellation_checks == 2; }) &&
+        failure.reason_code == "cancelled" && cancellation_checks == 2,
+        "cancellation remains observable between project candidates");
+    write_session(other / "session-a.jsonl", "session-a");
+    ok &= check(!extract() &&
+        failure.reason_code == "conversation_source_ambiguous", "matching projects remain ambiguous");
+    fs::remove(other / "session-a.jsonl");
+
+    fs::remove(source);
+    fs::create_directory(source);
+    ok &= check(!extract() &&
+        failure.reason_code == "conversation_source_unavailable", "a directory is not a transcript");
+    fs::remove(source);
+
+#ifndef _WIN32
+    const auto target = root / "linked-transcript.jsonl";
+    write_session(target, "session-a");
+    fs::create_symlink(target, source);
+    ok &= check(extract().has_value(),
+        "a matching regular-file symlink remains readable");
+    fs::remove(target);
+    ok &= check(!extract() &&
+        failure.reason_code == "conversation_source_unavailable", "a dangling link is a nonmatch");
+    fs::remove(source);
+    fs::create_symlink(source, source);
+    bool status_failed = false;
+    try {
+        extract();
+    }
+    catch (const fs::filesystem_error&) {
+        status_failed = true;
+    }
+    ok &= check(status_failed, "a candidate status error is not hidden as missing history");
+    fs::remove(source);
+#endif
+
+    // Native filename lookup decides aliases; transcript identity remains exact.
+    const auto uppercase = project / "SESSION-A.jsonl";
+    write_session(uppercase, "session-a");
+    const bool case_alias = fs::is_regular_file(source);
+    const auto aliased = extract();
+    ok &= check(aliased.has_value() == case_alias &&
+        (case_alias || failure.reason_code == "conversation_source_unavailable"),
+        "filename aliases follow this filesystem's case policy");
+    request.provider_session_id = "SESSION-A";
+    ok &= check(!extract() &&
+        failure.reason_code == "conversation_identity_mismatch", "session content is never case folded");
+    write_session(uppercase, "SESSION-A");
+    ok &= check(extract().has_value(),
+        "native uppercase identity and filename spelling are preserved");
+    write_session(other / "session-a.jsonl", "session-a");
+    const auto other_alias = extract();
+    ok &= check(other_alias.has_value() != case_alias &&
+        (!case_alias || failure.reason_code == "conversation_source_ambiguous"),
+        "case aliases in another project participate in ambiguity detection");
     return ok;
 }
 
@@ -217,6 +329,7 @@ int main()
     write(source, body);
     ok &= check(!qwen::export_conversation(request, [] { return true; }, &failure) &&
         failure.reason_code == "cancelled", "cancelled scan emits no export");
+    ok &= source_lookup(root, request);
     fs::remove_all(root);
     return ok ? 0 : 1;
 }
