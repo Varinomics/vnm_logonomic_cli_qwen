@@ -1771,6 +1771,8 @@ void handle_usage(addon::Invocation_context& context)
         page.account_context = request->context.account_context;
         page.profile_storage = request->context.profile_storage;
         page.incomplete_historical_coverage = snapshot->incomplete;
+        auto validation_page = page;
+        validation_page.records.reserve(2);
         std::size_t end = begin;
         std::size_t bytes = 0;
         while (end < snapshot->records.size() && page.records.size() < addon::k_max_usage_page_records) {
@@ -1780,16 +1782,28 @@ void handle_usage(addon::Invocation_context& context)
                 const bool complete = end + 1 == snapshot->records.size();
                 page.complete = complete;
                 page.next_cursor = complete ? std::nullopt : std::optional(std::to_string(end + 1));
-                if (!addon::append_usage_page_record(page, selected, bytes, 3)) {
+                const auto previous_bytes = bytes;
+                constexpr auto reserved_bytes = addon::limits::k_max_exchange_payload_bytes - k_max_page_bytes;
+                if (!addon::append_usage_page_record(page, selected, bytes, 3, reserved_bytes)) {
                     return false;
                 }
-                const auto encoded = addon::encode_usage_scan_result(page, 3);
+                // Byte and count bounds apply to the complete page. The other
+                // JSON limits are local at this depth; the adjacent pair keeps
+                // the codec's ordering and temporal-parent checks intact.
+                validation_page.complete = page.complete;
+                validation_page.next_cursor = page.next_cursor;
+                validation_page.records.clear();
+                if (page.records.size() > 1) {
+                    validation_page.records.push_back(page.records[page.records.size() - 2]);
+                }
+                validation_page.records.push_back(selected);
+                const auto encoded = addon::encode_usage_scan_result(validation_page, 3);
                 const auto serialized = addon::serialize_json(encoded);
-                if (serialized.size() > k_max_page_bytes || !addon::parse_json(serialized, {}, nullptr) ||
+                if (!addon::parse_json(serialized, {}, nullptr) ||
                     !addon::decode_usage_scan_result(encoded, &failure, 3))
                 {
                     page.records.pop_back();
-                    bytes -= addon::serialize_json(addon::encode_usage_record(selected, 3)).size() + 1;
+                    bytes = previous_bytes;
                     return false;
                 }
                 return true;
