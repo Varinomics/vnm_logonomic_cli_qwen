@@ -51,7 +51,7 @@ public:
         m_request.context.launch_environment = std::move(environment);
         m_request.context.profile_storage = addon::Profile_storage_context{1, qwen::path_string(fs::canonical(storage))};
         m_request.context.account_context = addon::Account_context{2, qwen::account_key(m_home), qwen::path_string(m_home)};
-        m_request.cache_selection = addon::Usage_cache_selection{std::nullopt, qwen::path_string(candidate)};
+        m_request.cache_selection = addon::Usage_cache_selection{std::nullopt, qwen::path_string(fs::canonical(candidate))};
         m_owner = addon::to_hex(addon::Sha256::digest(
             addon::serialize_json_canonical(addon::encode_usage_scan_request(m_request, 3))));
         m_request.snapshot_id = "page-boundary";
