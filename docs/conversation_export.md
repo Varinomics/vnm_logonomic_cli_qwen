@@ -12,6 +12,17 @@ history lives at `projects/*/chats/<session-id>.jsonl`. Runtime directories,
 usage summaries, artifact ledgers and nested subagent files are not substitute
 transcripts. Every consumed record must name the requested session.
 
+Lookup probes `<session-id>.jsonl` in each project's `chats` directory without
+listing unrelated transcripts. The ID must form one filename component; path
+separators and Windows drive/stream syntax are refused. Its spelling, including
+uppercase UUIDs, is preserved. Filename resolution follows the filesystem's case
+rules, while native `sessionId` validation remains exact. On a case-insensitive
+filesystem, a differently cased filename may therefore be a candidate; candidates
+in multiple projects remain ambiguous. Regular-file symlinks are followed.
+Missing or non-regular candidates are ignored; genuine status/access errors still
+fail extraction. A known file can be read without requiring permission to list
+its containing `chats` directory.
+
 The last conversation record selects the active `parentUuid` chain. Rewind
 records can therefore select an earlier ancestor without exporting discarded
 branches. A fork's copied prefix is already present in its file; `forkedFrom`
