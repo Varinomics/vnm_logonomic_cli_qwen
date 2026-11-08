@@ -386,26 +386,21 @@ bool append_record(const Json& row, addon::Conversation_message& message, addon:
 
 } // namespace
 
-std::optional<addon::Conversation_export_result> export_conversation(
-    const addon::Conversation_export_request& request, const std::function<bool()>& cancelled,
+std::optional<Conversation_records> read_conversation_records(
+    const fs::path& source, std::string_view session_id, const std::function<bool()>& cancelled,
     addon::Contract_failure* failure)
 {
-    addon::Session_launch_context context;
-    context.launch_environment = request.launch_environment;
-    context.account_context = request.account_context;
-    context.working_directory = request.working_directory;
-    const auto source = source_file(profile_for_context(context).home, request.provider_session_id, cancelled, failure);
-    if (!source) {
-        return {};
-    }
-    std::vector<Json> records;
-    std::map<std::string, std::vector<std::size_t>> fragments;
+    Conversation_records result;
+    auto& records = result.records;
+    auto& fragments = result.fragments;
     std::string leaf;
-    const auto snapshot = addon::read_conversation_jsonl(*source,
+    const auto snapshot = addon::read_conversation_jsonl(source,
         [&](const Json& row, addon::Contract_failure* error) {
-            if (json::text(row, "sessionId") != request.provider_session_id) {
+            if (json::text(row, "sessionId") != session_id) {
                 return fail(error, "conversation_identity_mismatch", "The Qwen file contains another conversation.");
             }
+            const auto index = records.size();
+            records.push_back(row);
             if (!conversation_record(row)) {
                 return true;
             }
@@ -425,15 +420,14 @@ std::optional<addon::Conversation_export_result> export_conversation(
                         "Qwen message fragments disagree on their parent.");
                 }
             }
-            group.push_back(records.size());
-            records.push_back(row);
+            group.push_back(index);
             leaf = id;
             return true;
         }, cancelled, failure);
     if (!snapshot) {
         return {};
     }
-    std::vector<std::string> chain;
+    auto& chain = result.chain;
     std::set<std::string> visited;
     while (!leaf.empty()) {
         const auto found = fragments.find(leaf);
@@ -446,6 +440,35 @@ std::optional<addon::Conversation_export_result> export_conversation(
         leaf = json::text(records[found->second.front()], "parentUuid");
     }
     std::reverse(chain.begin(), chain.end());
+    result.snapshot = *snapshot;
+    return result;
+}
+
+bool append_conversation_record(const Json& row, addon::Conversation_message& message,
+    addon::Contract_failure* failure)
+{
+    return append_record(row, message, failure);
+}
+
+std::optional<addon::Conversation_export_result> export_conversation(
+    const addon::Conversation_export_request& request, const std::function<bool()>& cancelled,
+    addon::Contract_failure* failure)
+{
+    addon::Session_launch_context context;
+    context.launch_environment = request.launch_environment;
+    context.account_context = request.account_context;
+    context.working_directory = request.working_directory;
+    const auto source = source_file(profile_for_context(context).home, request.provider_session_id, cancelled, failure);
+    if (!source) {
+        return {};
+    }
+    const auto retained = read_conversation_records(*source, request.provider_session_id, cancelled, failure);
+    if (!retained) {
+        return {};
+    }
+    const auto& records = retained->records;
+    const auto& fragments = retained->fragments;
+    const auto& chain = retained->chain;
     const auto phases = checkpoint_phases(records, fragments, chain);
     addon::Conversation_writer writer(request, cancelled);
     if (!writer.open(failure)) {
@@ -478,7 +501,7 @@ std::optional<addon::Conversation_export_result> export_conversation(
         fail(failure, "conversation_content_unavailable", "No retained Qwen conversation messages are available.");
         return {};
     }
-    return writer.finish(snapshot->incomplete_tail_omitted, failure);
+    return writer.finish(retained->snapshot.incomplete_tail_omitted, failure);
 }
 
 } // namespace qwen

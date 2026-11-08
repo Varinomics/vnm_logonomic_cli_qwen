@@ -7,6 +7,7 @@
 #include "qwen_launcher_approval.h"
 #include "qwen_lifecycle.h"
 #include "qwen_preparation.h"
+#include "qwen_resume.h"
 #include "qwen_session_wake.h"
 #include "qwen_usage.h"
 
@@ -119,6 +120,26 @@ void invoke(addon::Invocation_context& context)
             addon::handle_conversation_export(context, qwen::export_conversation);
         }
         else
+        if (capability == addon::k_interactive_resume_capability_id &&
+            request.operation == "inspect_resume" && request.capability.version >= 3)
+        {
+            addon::Contract_failure failure;
+            const auto decoded = addon::decode_resume_inspect_request(request.payload, &failure);
+            if (!decoded) {
+                context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
+                return;
+            }
+            const auto inspection = qwen::inspect_resume(decoded->context, decoded->resume_record,
+                [&] { return context.cancel_requested(); });
+            if (context.cancel_requested()) {
+                context.fail(addon::Result_status::CANCELLED, "cancelled");
+                return;
+            }
+            const addon::Resume_inspect_result result{
+                inspection.availability, addon::resume_inspect_request_digest_hex(*decoded), inspection.content};
+            context.succeed(addon::encode_resume_inspect_result(result, request.capability.version));
+        }
+        else
         if (capability == addon::k_attention_kind_capability_id && request.operation == addon::k_classify_event_operation) {
             addon::Contract_failure failure;
             const auto decoded = addon::decode_attention_classification_request(request.payload, &failure);
@@ -184,11 +205,13 @@ int main()
         {addon::k_interactive_initial_prompt_capability_id, addon::k_interactive_initial_prompt_version},
         {"lifecycle-events", 2}, {"coordination-delivery", 1},
         {addon::k_context_state_capability_id, addon::k_context_state_capability_version},
+        {addon::k_execution_context_capability_id, addon::k_execution_context_version},
         {"session-wake", 1},
         {"model-context-delivery", 1},
         {addon::k_attention_kind_capability_id, addon::k_attention_kind_version},
         {"environment-bootstrap", 1},
-        {"structured-session", 3}, {"delegated-session", 3}, {"interactive-resume", 2},
+        {"structured-session", 3}, {"delegated-session", 3},
+        {"interactive-resume", 2}, {"interactive-resume", 3}, {"interactive-resume", 4},
     };
     addon::Adapter_runtime runtime(std::move(options));
     runtime.set_invoke_handler(invoke);

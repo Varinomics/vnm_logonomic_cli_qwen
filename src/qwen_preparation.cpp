@@ -5,6 +5,7 @@
 #include "qwen_launcher.h"
 #include "qwen_peer.h"
 #include "qwen_profile.h"
+#include "qwen_resume.h"
 #include "qwen_session_wake.h"
 
 #include <logonomic_cli_addon/launch_preparation.h>
@@ -16,7 +17,6 @@
 #include <fstream>
 #include <initializer_list>
 #include <optional>
-#include <regex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -236,7 +236,8 @@ void prepare_launch(addon::Invocation_context& invocation)
     context.working_directory = request->working_directory;
     context.account_context = request->account_context;
     context.launch_environment = request->launch_environment;
-    (void)profile_for_context(context);
+    const auto profile = profile_for_context(context);
+    patch.set.emplace_back(k_profile_home_environment, path_string(profile.home));
     if (request->session_wake) {
         patch.session_wake = prepare_session_wake(context);
         if (patch.session_wake->available) {
@@ -360,8 +361,7 @@ void prepare_resume(addon::Invocation_context& invocation)
     if (!bootstrap_available(request->context.launch_environment, invocation)) {
         return;
     }
-    static const std::regex uuid("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
-    if (!json_util::exact_keys(request->resume_record, {"provider_session_id"}) || !std::regex_match(session, uuid)) {
+    if (!valid_resume_record(request->resume_record)) {
         invocation.fail(addon::Result_status::UNAVAILABLE, "resume_selector_unavailable");
         return;
     }
@@ -396,6 +396,24 @@ void prepare_resume(addon::Invocation_context& invocation)
         invocation.fail(addon::Result_status::UNAVAILABLE, "managed_hooks_unavailable");
         return;
     }
+    auto inspection_context = request->context;
+#ifdef _WIN32
+    if (powershell) {
+        inspection_context.launcher.runner_key = addon::k_runner_direct;
+        inspection_context.launcher_argv = powershell->option_values;
+    }
+#endif
+    const auto inspection = inspect_resume(inspection_context, request->resume_record,
+        [&] { return invocation.cancel_requested(); });
+    if (invocation.cancel_requested()) {
+        invocation.fail(addon::Result_status::CANCELLED, "cancelled");
+        return;
+    }
+    if (!inspection.preparation_allowed) {
+        invocation.fail(addon::Result_status::UNAVAILABLE, inspection.preparation_failure.empty()
+            ? "qwen_resume_unavailable" : inspection.preparation_failure);
+        return;
+    }
     std::optional<std::vector<std::string>> command;
 #ifdef _WIN32
     if (powershell) {
@@ -424,6 +442,7 @@ void prepare_resume(addon::Invocation_context& invocation)
     result.process.executable = k_bridge;
     result.process.argv = std::move(*command);
     result.patch.set = profile.environment;
+    set_environment(result.patch.set, std::string(k_profile_home_environment), path_string(profile.home));
     result.process.stdin_behavior = addon::Stdin_behavior::INHERIT;
     result.patch.profile_storage = request->context.profile_storage;
     result.patch.account_context = request->context.account_context;

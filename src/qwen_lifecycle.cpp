@@ -1,5 +1,6 @@
 #include "qwen_lifecycle.h"
 #include "qwen_json.h"
+#include "qwen_resume.h"
 
 #include <logonomic_cli_addon/capability_ids.h>
 #include <logonomic_cli_addon/context_state.h>
@@ -41,11 +42,34 @@ std::optional<std::uint64_t> context_tokens(const Json& body, std::string_view k
     return (std::uint64_t)tokens;
 }
 
+void classify_start_directory(
+    const addon::Classify_event_request& request, addon::Classify_event_result& result,
+    const std::string& session)
+{
+    if (request.execution_context_version != addon::k_execution_context_version || request.execution_failure) {
+        return;
+    }
+    addon::Execution_context_update update;
+    update.provider_session_id = session;
+    update.transition_nonce    = request.transition_nonce;
+    update.source              = "qwen.SessionStart";
+    const auto* cwd = request.event.body.find("cwd");
+    if (cwd && cwd->is_string() && addon::is_execution_local_path(cwd->as_string())) {
+        update.status      = addon::Execution_context_status::CONFIRMED;
+        update.environment = "local";
+        update.cwd         = cwd->as_string();
+    }
+    // This native root snapshot establishes the default directory only for
+    // this activation. Launch inputs and transcript paths cannot fill a gap.
+    result.execution_updates.push_back(std::move(update));
+}
+
 } // namespace
 
 addon::Classify_event_result classify_event(const addon::Classify_event_request& request)
 {
     addon::Classify_event_result result;
+    result.execution_failure = request.execution_failure;
     const auto& body = request.event.body;
     const auto session = json_util::text(body, "session_id");
     const auto agent = json_util::text(body, "agent_id");
@@ -63,6 +87,12 @@ addon::Classify_event_result classify_event(const addon::Classify_event_request&
         return result;
     }
     if (!agent.empty()) {
+        return result;
+    }
+    if (name == "SessionEnd" && json_util::text(body, "reason") == "clear") {
+        // Qwen fires this reset notification without awaiting it. The next
+        // SessionStart owns turnover; a late clear end could otherwise end
+        // a new activation of the same native ID after A -> B -> A.
         return result;
     }
     addon::Lifecycle_observation observation;
@@ -98,7 +128,9 @@ addon::Classify_event_result classify_event(const addon::Classify_event_request&
         }
     }
     const auto turn = json_util::text(body, "prompt_id");
-    if (!turn.empty() && identity(turn)) {
+    // Native clear/resume can retain the departed conversation's prompt_id
+    // while emitting SessionStart for the newly selected conversation.
+    if (name != "SessionStart" && !turn.empty() && identity(turn)) {
         observation.provider_turn_id = turn;
     }
     if (name == "SessionStart") {
@@ -115,10 +147,11 @@ addon::Classify_event_result classify_event(const addon::Classify_event_request&
         }
         observation.session_transition = addon::Session_transition::STARTED;
         observation.session_source = source;
-        observation.resume_record = json_util::object({{"provider_session_id", Json(session)}});
+        observation.resume_record = make_resume_record(session, body);
         result.classification = addon::Classification::TRANSITION;
         result.transition = observation.session_source == "resume"
             ? addon::Transition_kind::RESUME : addon::Transition_kind::START;
+        classify_start_directory(request, result, session);
     }
     else {
         if (!request.ledger.current_transition ||
@@ -168,6 +201,7 @@ addon::Classify_event_result classify_event(const addon::Classify_event_request&
         auto context_failure = std::move(result.context_failure);
         result = {};
         result.context_failure = std::move(context_failure);
+        result.execution_failure = request.execution_failure;
         result.lifecycle_degradation = addon::Lifecycle_degradation{1, session};
         return result;
     }
