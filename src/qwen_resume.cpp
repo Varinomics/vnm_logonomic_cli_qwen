@@ -6,7 +6,6 @@
 
 #include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/package_source.h>
-#include <logonomic_cli_addon/usage_scan.h>
 
 #include <algorithm>
 #include <exception>
@@ -72,7 +71,7 @@ bool same_path(const fs::path& left, const fs::path& right)
         return true;
     }
     std::error_code error;
-    return fs::equivalent(addon::usage_cache_io_path(left), addon::usage_cache_io_path(right), error) && !error;
+    return fs::equivalent(native_io_path(left), native_io_path(right), error) && !error;
 }
 
 bool project_text_matches(std::string_view left, std::string_view right)
@@ -209,7 +208,7 @@ struct Runtime_setting
 
 Runtime_setting runtime_setting(const fs::path& path)
 {
-    const auto io_path = addon::usage_cache_io_path(path);
+    const auto io_path = native_io_path(path);
     std::error_code error;
     const auto status = fs::status(io_path, error);
     if (status.type() == fs::file_type::not_found) {
@@ -324,7 +323,7 @@ bool understood_record(const Json& row)
 Resume_inspection inspect_source(const fs::path& source, std::string_view session_id,
     std::string_view project, Resume_inspection result, const std::function<bool()>& cancelled)
 {
-    const auto io_source = addon::usage_cache_io_path(source);
+    const auto io_source = native_io_path(source);
     std::error_code error;
     const auto status = fs::status(io_source, error);
     // /clear has no transcript until Qwen records a turn, and /cd can move an

@@ -5,7 +5,6 @@
 #include <logonomic_cli_addon/json_utilities.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
-#include <logonomic_cli_addon/usage_scan.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -61,20 +60,20 @@ std::optional<fs::path> source_file(const fs::path& home, std::string_view id,
     // The request decoder validates text; lookup must also stay within one
     // filename component, including on Windows (drive and stream syntax).
     if (id.find_first_of("/\\:") == std::string_view::npos &&
-        fs::is_directory(addon::usage_cache_io_path(projects)))
+        fs::is_directory(native_io_path(projects)))
     {
         const auto name = addon::path_from_utf8(std::string(id) + ".jsonl");
-        for (const auto& project : fs::directory_iterator(addon::usage_cache_io_path(projects))) {
+        for (const auto& project : fs::directory_iterator(native_io_path(projects))) {
             if (cancelled && cancelled()) {
                 fail(failure, "cancelled", "Conversation extraction was cancelled.");
                 return {};
             }
             const auto chats = projects / project.path().filename() / "chats";
-            if (!fs::is_directory(addon::usage_cache_io_path(chats))) {
+            if (!fs::is_directory(native_io_path(chats))) {
                 continue;
             }
             const auto candidate = chats / name;
-            if (!fs::is_regular_file(addon::usage_cache_io_path(candidate))) {
+            if (!fs::is_regular_file(native_io_path(candidate))) {
                 continue;
             }
             if (source) {
@@ -397,7 +396,7 @@ std::optional<Conversation_records> read_conversation_records(
     auto& records = result.records;
     auto& fragments = result.fragments;
     std::string leaf;
-    const auto snapshot = addon::read_conversation_jsonl(addon::usage_cache_io_path(source),
+    const auto snapshot = addon::read_conversation_jsonl(native_io_path(source),
         [&](const Json& row, addon::Contract_failure* error) {
             if (json::text(row, "sessionId") != session_id) {
                 return fail(error, "conversation_identity_mismatch", "The Qwen file contains another conversation.");

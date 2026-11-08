@@ -2,6 +2,7 @@
 #include "qwen_profile.h"
 
 #include <logonomic_cli_addon/sha256.h>
+#include <logonomic_cli_addon/usage_scan.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -16,6 +17,16 @@ namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
 
 } // namespace
+
+fs::path native_io_path(const fs::path& path)
+{
+#ifdef _WIN32
+    // The extended prefix disables Win32's ordinary dot-segment resolution.
+    return addon::usage_cache_io_path(path.lexically_normal());
+#else
+    return path;
+#endif
+}
 
 std::string account_key(const fs::path& home)
 {

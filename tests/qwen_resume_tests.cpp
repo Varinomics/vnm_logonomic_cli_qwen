@@ -368,6 +368,35 @@ void settings_contract(const fs::path& root)
     expect(qwen::inspect_resume(context, qwen::make_resume_record(k_session, Json::object())),
         Availability::AVAILABLE, Content::NONEMPTY, true,
         "legacy records in the ordinary profile runtime remain inspectable");
+#ifdef _WIN32
+    const auto staging = fixture.profile.parent_path() / "staging";
+    fs::create_directory(staging);
+    const auto profile_alias = staging / ".." / fixture.profile.filename();
+    auto aliased = context;
+    aliased.launch_environment->bootstrap->resolved_home = addon::path_to_utf8(profile_alias);
+    aliased.launch_environment->effective_environment.set("QWEN_HOME", Json(addon::path_to_utf8(profile_alias)));
+    const auto aliased_record = [&](const fs::path& source) {
+        return qwen::make_resume_record(k_session, json::object({
+            {"transcript_path", Json(addon::path_to_utf8(source))},
+            {"cwd", Json(addon::path_to_utf8(fixture.cwd))},
+            {"profile_home", Json(addon::path_to_utf8(profile_alias))}}));
+    };
+    const auto default_record = aliased_record(default_source);
+    expect(qwen::inspect_resume(aliased, default_record), Availability::AVAILABLE, Content::NONEMPTY, true,
+        "absolute profile dot segments retain the default native history");
+    check(qwen::profile_for_context(aliased).home == profile_alias &&
+        json::text(json::member(default_record, "native_source"), "profile_home") == addon::path_to_utf8(profile_alias),
+        "I/O normalization preserves the selected profile and resume-record spelling");
+
+    write(fixture.profile / "settings.json", addon::serialize_json(json::object({{"advanced", json::object({
+        {"runtimeOutputDir", Json(addon::path_to_utf8(fixture.runtime))}})}})));
+    const auto override_bytes = read(fixture.profile / "settings.json");
+    expect(qwen::inspect_resume(aliased, aliased_record(fixture.source)),
+        Availability::AVAILABLE, Content::NONEMPTY, true,
+        "absolute profile dot segments preserve settings-selected native runtime");
+    check(read(fixture.profile / "settings.json") == override_bytes,
+        "profile alias inspection does not rewrite native runtime settings");
+#endif
 }
 
 void record_contract(const fs::path& root)

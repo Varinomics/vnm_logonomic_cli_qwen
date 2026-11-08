@@ -19,6 +19,7 @@ struct resolved_profile_t
 };
 
 std::string account_key(const std::filesystem::path& home);
+std::filesystem::path native_io_path(const std::filesystem::path& path);
 resolved_profile_t profile_from_environment(const logonomic::cli_addon::Launch_environment& environment);
 resolved_profile_t profile_for_context(const logonomic::cli_addon::Session_launch_context& context);
 
