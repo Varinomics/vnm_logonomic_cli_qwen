@@ -6,6 +6,7 @@
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/package_source.h>
+#include <logonomic_cli_addon/usage_scan.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -52,7 +53,7 @@ public:
     ~Workspace()
     {
         std::error_code error;
-        fs::remove_all(m_path, error);
+        fs::remove_all(addon::usage_cache_io_path(m_path), error);
     }
 
     fs::path m_path;
@@ -60,8 +61,8 @@ public:
 
 void write(const fs::path& path, std::string_view bytes)
 {
-    fs::create_directories(path.parent_path());
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    fs::create_directories(addon::usage_cache_io_path(path.parent_path()));
+    std::ofstream output(addon::usage_cache_io_path(path), std::ios::binary | std::ios::trunc);
     output << bytes;
     output.close();
     check(output.good(), "write native transcript fixture");
@@ -69,7 +70,7 @@ void write(const fs::path& path, std::string_view bytes)
 
 std::string read(const fs::path& path)
 {
-    std::ifstream input(path, std::ios::binary);
+    std::ifstream input(addon::usage_cache_io_path(path), std::ios::binary);
     return {std::istreambuf_iterator<char>(input), {}};
 }
 
@@ -104,8 +105,8 @@ struct Resume_fixture
         runtime(root / "runtime"),
         cwd(root / "project" / "nested")
     {
-        fs::create_directories(profile);
-        fs::create_directories(cwd);
+        fs::create_directories(addon::usage_cache_io_path(profile));
+        fs::create_directories(addon::usage_cache_io_path(cwd));
         source = runtime / "projects" / ascii_project_name(cwd) / "chats" /
             (std::string(k_session) + ".jsonl");
         context.launcher = {"qwen", addon::k_runner_direct, {}};
@@ -232,10 +233,10 @@ void content_contract(const fs::path& root)
     write(fixture.source, "");
     expect(inspect(), Availability::ABSENT, Content::EMPTY, false,
         "a fully read empty JSONL has no resumable native records");
-    fs::remove(fixture.source);
-    fs::create_directory(fixture.source);
+    fs::remove(addon::usage_cache_io_path(fixture.source));
+    fs::create_directory(addon::usage_cache_io_path(fixture.source));
     expect(inspect(), Availability::UNKNOWN, Content::UNKNOWN, true, "unreadable native source stays unknown");
-    fs::remove(fixture.source);
+    fs::remove(addon::usage_cache_io_path(fixture.source));
     write(fixture.source, rows({fixture.row("user", {}, "user")}));
     expect(qwen::inspect_resume(fixture.context, fixture.record, [] { return true; }),
         Availability::UNKNOWN, Content::UNKNOWN, false, "cancelled inspection does not admit preparation");
@@ -432,7 +433,7 @@ void packaged_contract(const fs::path& package, const fs::path& root, unsigned v
     write(fixture.source, rows({fixture.row("title", {}, "system", "custom_title")}));
     check(invoke().content == (version == 4 ? Content::EMPTY : Content::UNKNOWN),
         "a fresh packaged inspection reevaluates native content");
-    fs::remove(fixture.source);
+    fs::remove(addon::usage_cache_io_path(fixture.source));
     const auto missing = invoke();
     check(missing.availability == Availability::UNKNOWN && missing.content == Content::UNKNOWN,
         "deleted or relocated native history stays unknown across the process boundary");
@@ -455,6 +456,18 @@ int main(int argc, char** argv)
         record_contract(workspace.m_path / "records");
         packaged_contract(addon::path_from_utf8(argv[1]), workspace.m_path / "packaged-v3", 3);
         packaged_contract(addon::path_from_utf8(argv[1]), workspace.m_path / "packaged-v4", 4);
+#ifdef _WIN32
+        // Qwen repeats its sanitized cwd inside the transcript path, so valid
+        // ordinary workspaces can exceed MAX_PATH without a long component.
+        const auto long_root = workspace.m_path / "native-long-path" / std::string(80, 'p');
+        Resume_fixture long_fixture(long_root / "inspection");
+        check(long_fixture.source.native().size() > 260, "exercise a native transcript beyond MAX_PATH");
+        write(long_fixture.source, rows({long_fixture.row("user", {}, "user")}));
+        expect(qwen::inspect_resume(long_fixture.context, long_fixture.record),
+            Availability::AVAILABLE, Content::NONEMPTY, true,
+            "long native paths retain exact ordinary resume scope and content");
+        packaged_contract(addon::path_from_utf8(argv[1]), long_root / "packaged", 4);
+#endif
         return 0;
     }
     catch (const std::exception& error) {
