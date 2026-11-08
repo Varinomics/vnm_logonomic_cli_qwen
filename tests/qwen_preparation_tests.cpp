@@ -1,6 +1,7 @@
 #include "qwen_preparation.h"
 #include "qwen_accounts.h"
 #include "qwen_profile.h"
+#include "qwen_resume.h"
 #include "qwen_config.h"
 #include "qwen_launcher.h"
 #include "qwen_json.h"
@@ -298,6 +299,8 @@ void launch_disposition(const char* executable)
         require(addon::validate_launch_patch(*patch, {}, {}, &failure), "returned patch must satisfy host policy");
         if (prepared) {
             wake_patch(*patch);
+            require(qwen::environment_value(patch->set, qwen::k_profile_home_environment) == home,
+                "native hook provenance receives the exact bootstrap-selected profile");
         }
         if (!prepared) require(patch->set.empty() && patch->unset.empty() && !patch->argv,
             "unmanaged preparation must preserve the native launch");
@@ -433,6 +436,8 @@ void resume_policy(const char* executable)
     environment.bootstrap = addon::Environment_bootstrap_evidence{home};
     request.context.launch_environment = environment;
     request.resume_record.set("provider_session_id", addon::Json_value("019933a1-6e43-7102-a520-b3c8294cc763"));
+    require(!fs::exists(root / "selected" / "projects"),
+        "legacy resume fixture has no native transcript evidence");
     Context context;
     context.m_request = {"resume", {"interactive-resume", 2}, "prepare_resume", addon::encode_resume_prepare_request(request, 2)};
     qwen::handle_preparation(context);
@@ -440,8 +445,10 @@ void resume_policy(const char* executable)
     const auto result = context.m_result ? addon::decode_resume_prepare_result(*context.m_result, &failure, 2) : std::nullopt;
     require(result && addon::validate_resume_process_proposal(result->process, &failure) &&
         addon::validate_launch_patch(result->patch, {}, {}, &failure), "resume producer must satisfy terminal policy");
-    require(result->patch.set == qwen::environment_pairs(environment.effective_environment),
-        "resume patch must retain the frozen profile and authentication environment");
+    auto expected_environment = qwen::environment_pairs(environment.effective_environment);
+    qwen::set_environment(expected_environment, std::string(qwen::k_profile_home_environment), home);
+    require(result->patch.set == expected_environment,
+        "resume retains the frozen authentication environment and supplies its resolved hook profile");
     require(result->process.argv.back() == "019933a1-6e43-7102-a520-b3c8294cc763" &&
         addon::validate_resume_acknowledgment(request.resume_record, result->acknowledgment, &failure),
         "resume must preserve the selected native session identity");
@@ -455,6 +462,81 @@ void resume_policy(const char* executable)
     require(wake_result.has_value(), "resume preserves its independently negotiated wake result");
     wake_patch(wake_result->patch);
     request.context.session_wake.reset();
+    {
+        auto retained = request;
+        const auto runtime = root / "native-runtime";
+        retained.context.launch_environment->effective_environment.set("QWEN_RUNTIME_DIR",
+            addon::Json_value(addon::path_to_utf8(runtime)));
+        // Native sanitizeCwd replaces each non-alphanumeric UTF-16 unit;
+        // its Windows input is lowercased before that replacement.
+        std::string project;
+        for (auto unit : root.u16string()) {
+#ifdef _WIN32
+            if (unit >= u'A' && unit <= u'Z') {
+                unit += u'a' - u'A';
+            }
+            if (unit == u'\u212a') {
+                unit = u'k';
+            }
+            else
+            if (unit == u'\u0130') {
+                project += "i-";
+                continue;
+            }
+#endif
+            project += (unit >= u'a' && unit <= u'z') || (unit >= u'A' && unit <= u'Z') ||
+                (unit >= u'0' && unit <= u'9') ? static_cast<char>(unit) : '-';
+        }
+        const auto transcript = runtime / "projects" / project / "chats" /
+            "019933a1-6e43-7102-a520-b3c8294cc763.jsonl";
+        fs::create_directories(transcript.parent_path());
+        auto turn = *addon::parse_json(R"({"type":"user","uuid":"first-turn","parentUuid":null,
+            "message":{"role":"user","parts":[{"text":"Retained conversation"}]}})", {}, nullptr);
+        turn.set("sessionId", addon::Json_value("019933a1-6e43-7102-a520-b3c8294cc763"));
+        turn.set("cwd", addon::Json_value(request.context.working_directory));
+        std::ofstream transcript_output(transcript, std::ios::binary);
+        transcript_output << addon::serialize_json(turn) << '\n';
+        transcript_output.close();
+        require(bool(transcript_output), "native resume fixture is complete");
+        const auto native = json_util::object({
+            {"transcript_path", addon::Json_value(addon::path_to_utf8(transcript))},
+            {"cwd", addon::Json_value(request.context.working_directory)},
+            {"profile_home", addon::Json_value(home)}});
+        retained.resume_record = qwen::make_resume_record("019933a1-6e43-7102-a520-b3c8294cc763", native);
+        require(retained.resume_record.find("native_source"), "retained resume fixture carries native scope");
+        Context retained_context;
+        retained_context.m_request = {"resume-retained", {"interactive-resume", 2}, "prepare_resume",
+            addon::encode_resume_prepare_request(retained, 2)};
+        qwen::handle_preparation(retained_context);
+        const auto proposal = retained_context.m_result
+            ? addon::decode_resume_prepare_result(*retained_context.m_result, &failure, 2) : std::nullopt;
+        require(proposal && proposal->process.argv.back() == "019933a1-6e43-7102-a520-b3c8294cc763" &&
+            addon::validate_resume_acknowledgment(retained.resume_record, proposal->acknowledgment, &failure) &&
+            qwen::environment_value(proposal->patch.set, "QWEN_RUNTIME_DIR") == addon::path_to_utf8(runtime) &&
+            qwen::environment_value(proposal->patch.set, qwen::k_profile_home_environment) == home,
+            "enriched resume prepares its exact native runtime and acknowledges the complete selected record");
+    }
+    {
+        auto mismatched = request;
+        const auto native = json_util::object({
+            {"transcript_path", addon::Json_value(addon::path_to_utf8(root / "other-runtime" / "projects" /
+                "project" / "chats" / "019933a1-6e43-7102-a520-b3c8294cc763.jsonl"))},
+            {"cwd", addon::Json_value(request.context.working_directory)},
+            {"profile_home", addon::Json_value(addon::path_to_utf8(root / "other-profile"))}});
+        mismatched.resume_record = qwen::make_resume_record("019933a1-6e43-7102-a520-b3c8294cc763", native);
+        Context mismatched_context;
+        mismatched_context.m_request = {"resume-wrong-profile", {"interactive-resume", 2}, "prepare_resume",
+            addon::encode_resume_prepare_request(mismatched, 2)};
+        bool rejected = false;
+        try {
+            qwen::handle_preparation(mismatched_context);
+        }
+        catch (const std::exception& error) {
+            rejected = std::string_view(error.what()) == "qwen_resume_scope_mismatch";
+        }
+        require(rejected && !mismatched_context.m_result,
+            "explicit resume refuses a retained native identity from another prepared profile");
+    }
 #ifdef _WIN32
     const auto direct_capture = run_resume_process(*result, request, fs::absolute(executable));
     const auto* direct_arguments = direct_capture.find("argv");

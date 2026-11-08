@@ -56,7 +56,7 @@ function(qwen_target target)
 endfunction()
 
 add_library(qwen_provider STATIC
-    src/qwen_conversation.cpp
+    src/qwen_conversation.cpp src/qwen_resume.cpp
     src/qwen_accounts.cpp src/qwen_usage.cpp src/qwen_profile.cpp
     src/qwen_acp.cpp src/qwen_config.cpp src/qwen_launcher.cpp src/qwen_launcher_approval.cpp
     src/qwen_lifecycle.cpp src/qwen_preparation.cpp
@@ -101,6 +101,13 @@ endif()
 add_test(NAME qwen_conversation_tests COMMAND qwen_conversation_tests)
 set_tests_properties(qwen_conversation_tests PROPERTIES TIMEOUT 30)
 
+add_executable(qwen_resume_tests tests/qwen_resume_tests.cpp)
+target_link_libraries(qwen_resume_tests PRIVATE qwen_provider)
+qwen_target(qwen_resume_tests)
+add_dependencies(qwen_resume_tests qwen_package)
+add_test(NAME qwen_resume_tests COMMAND qwen_resume_tests "${QWEN_PACKAGE_DIRECTORY}")
+set_tests_properties(qwen_resume_tests PROPERTIES TIMEOUT 120)
+
 add_executable(qwen_wake_tests tests/qwen_wake_tests.cpp)
 target_link_libraries(qwen_wake_tests PRIVATE qwen_provider)
 qwen_target(qwen_wake_tests)
@@ -128,6 +135,11 @@ target_link_libraries(qwen_contract_tests PRIVATE qwen_provider)
 qwen_target(qwen_contract_tests)
 add_dependencies(qwen_contract_tests qwen_package)
 add_test(NAME qwen_contract_tests COMMAND qwen_contract_tests "${QWEN_PACKAGE_DIRECTORY}")
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME qwen_helper_tests
+    COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/qwen_helper_tests.py"
+        "${QWEN_PACKAGE_DIRECTORY}" "$<TARGET_FILE:qwen_contract_tests>")
+set_tests_properties(qwen_helper_tests PROPERTIES TIMEOUT 60)
 add_executable(qwen_usage_tests tests/qwen_usage_tests.cpp)
 target_link_libraries(qwen_usage_tests PRIVATE qwen_provider)
 qwen_target(qwen_usage_tests)
@@ -192,3 +204,14 @@ add_executable(qwen_error_boundary_tests tests/qwen_error_boundary_tests.cpp)
 target_link_libraries(qwen_error_boundary_tests PRIVATE qwen_provider logonomic_cli_addon_sdk::test_support)
 qwen_target(qwen_error_boundary_tests)
 add_test(NAME qwen_error_boundary_tests COMMAND qwen_error_boundary_tests)
+
+set(QWEN_NATIVE_TEST_COMMAND "" CACHE STRING "Installed Qwen command and arguments for opt-in native PTY tests")
+if(QWEN_NATIVE_TEST_COMMAND)
+    add_dependencies(qwen_contract_tests logonomic_cli_addon_host_simulator)
+    add_test(NAME qwen_live_switch_native_tests
+        COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/qwen_live_switch_native_tests.py"
+            "${QWEN_PACKAGE_DIRECTORY}" "$<TARGET_FILE:logonomic_cli_addon_host_simulator>"
+            "$<TARGET_FILE:qwen_contract_tests>" -- ${QWEN_NATIVE_TEST_COMMAND})
+    set_tests_properties(qwen_live_switch_native_tests PROPERTIES
+        TIMEOUT 180 SKIP_RETURN_CODE 77 LABELS "cli-addon;native-acceptance;live-switch")
+endif()

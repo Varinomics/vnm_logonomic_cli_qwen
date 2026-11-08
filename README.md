@@ -49,6 +49,22 @@ the turn. StopFailure confirms failure of an identified root turn. Permission
 notifications provide unpaired inferred attention. Child lifecycle tracking is
 not advertised: Qwen's child stop hook runs before its blockable completion gate.
 
+In a live terminal, native root `SessionStart` hooks select the conversation after
+`/clear` or a successful `/resume`. Logonomic retains the departed conversation in
+session history; returning to it starts a new activation. Cancelling the native
+picker or requesting a missing UUID emits no replacement activation. The selected
+conversation's native `cwd` supplies the optional `execution-context@1` snapshot.
+This is a snapshot at activation; later directory changes require another native
+activation before the add-on can confirm the new default directory.
+
+The optional `interactive-resume@3` and `@4` inspections use Qwen's native
+project-scoped transcript store. Version 4 also reports whether validated history
+contains conversation content. Missing or incomplete native evidence remains
+unknown; only a validated transcript proves content or emptiness. Resume records
+retain the native transcript path, activation directory and selected profile so
+preparation can verify the same store. Existing ID-only records remain supported
+by `interactive-resume@2`.
+
 The optional `session-wake@1` capability uses Qwen's documented cross-session
 peer protocol on Linux. A managed launch binds its selected profile; each wake
 resolves the exact native session and verifies the registry's process start,

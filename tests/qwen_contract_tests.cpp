@@ -474,9 +474,8 @@ bool lifecycle_contract()
     request.event.name = "SessionEnd";
     request.event.body.set("reason", qwen::Json("clear"));
     result = qwen::classify_event(request);
-    ok &= check(result.observations.size() == 1 &&
-        result.observations.front().session_transition == addon::Session_transition::ENDED,
-        "clear ends its old exact native session before identity rotation");
+    ok &= check(result.classification == addon::Classification::IGNORED && result.observations.empty(),
+        "nonawaited clear-end leaves turnover to the next authoritative native start");
     request.event.name = "SessionStart";
     request.event.body.set("source", qwen::Json("clear"));
     request.event.body.set("session_id", qwen::Json("87654321-1234-4234-8234-123456789abc"));
@@ -490,6 +489,16 @@ bool lifecycle_contract()
     ok &= check(qwen::classify_event(request).classification == addon::Classification::IGNORED,
         "a nonawaited old-ID clear end arriving after new start cannot end the new epoch");
     request.ledger.current_transition->provider_session_id = "12345678-1234-4234-8234-123456789abc";
+    ok &= check(qwen::classify_event(request).classification == addon::Classification::IGNORED,
+        "an old clear-end cannot end returning A after A to B to A");
+    for (const auto* reason : {"logout", "prompt_input_exit", "bypass_permissions_disabled", "other"}) {
+        request.event.body.set("reason", qwen::Json(reason));
+        result = qwen::classify_event(request);
+        ok &= check(result.observations.size() == 1 &&
+                result.observations.front().session_transition == addon::Session_transition::ENDED &&
+                result.observations.front().session_end_reason == reason,
+            "native terminal-end reasons retain their existing authority");
+    }
     request.event.name = "Stop";
     request.event.body.set("prompt_id", qwen::Json("12345678-1234-4234-8234-123456789abc########7"));
     result = qwen::classify_event(request);
@@ -565,7 +574,7 @@ bool declared_profile_admits_every_shape(const std::filesystem::path& package)
         classify("Notification", "notification_type", notification,
             "the declaration refuses an approval request or a structured question");
     }
-    classify("SessionEnd", "reason", "clear", "the declaration refuses a session end");
+    classify("SessionEnd", "reason", "prompt_input_exit", "the declaration refuses a session end");
     return ok;
 }
 
@@ -845,6 +854,154 @@ bool context_contract(const std::filesystem::path& package, const std::filesyste
     return ok;
 }
 
+bool execution_context_contract(const std::filesystem::path& package, const std::filesystem::path& root)
+{
+    addon::Simulator_options options;
+    options.package_directory    = package;
+    options.scratch_directory    = root / "execution_scratch";
+    options.profile_storage_root = root / "execution_profiles";
+    addon::Host_simulator host(std::move(options), nullptr);
+    addon::Contract_failure failure;
+    if (!check(host.start(&failure), "execution-context package starts")) {
+        return false;
+    }
+    const auto live = host.live_capabilities();
+    bool ok = check(std::find(live.begin(), live.end(), addon::Capability_pair{
+            addon::k_execution_context_capability_id, addon::k_execution_context_version}) != live.end(),
+        "the packaged declaration and adapter handshake negotiate execution-context@1");
+    const auto invoke = [&](const addon::Json_value& payload) {
+        const auto id = host.invoke({"helper-ingress", 2}, addon::k_classify_event_operation, payload, 15000);
+        const auto outcome = host.wait_outcome(id, 18000);
+        addon::Contract_failure failure;
+        const auto result = outcome && outcome->status == addon::Host_status::SUCCESS
+            ? addon::decode_classify_event_result(outcome->payload, &failure, 2) : std::nullopt;
+        if (!result) {
+            throw std::runtime_error("packaged execution-context classification did not decode");
+        }
+        return *result;
+    };
+    const std::string first = "12345678-1234-4234-8234-123456789abc";
+    const std::string second = "87654321-1234-4234-8234-123456789abc";
+    const auto cwd = addon::path_to_utf8(root / "native cwd" / "nested");
+    addon::Classify_event_request request;
+    request.transition_nonce = std::string(32, 'a');
+    request.event.name = "SessionStart";
+    request.event.body = json_util::object({
+        {"session_id", qwen::Json(first)}, {"event_id", qwen::Json("start-a")},
+        {"source", qwen::Json("startup")}, {"cwd", qwen::Json(cwd)}});
+    auto result = invoke(addon::encode_classify_event_request(request));
+    ok &= check(result.classification == addon::Classification::TRANSITION &&
+            result.execution_updates.empty() && !result.execution_failure,
+        "hosts without execution-context opt-in receive the ordinary identity transition");
+    request.execution_context_version = addon::k_execution_context_version;
+    result = invoke(addon::encode_classify_event_request(request));
+    if (!check(result.execution_updates.size() == 1 && !result.execution_failure,
+            "root SessionStart supplies one native default-directory snapshot"))
+    {
+        return false;
+    }
+    const auto initial = result.execution_updates.front();
+    ok &= check(initial.provider_session_id == first && initial.transition_nonce == std::string(32, 'a') &&
+            initial.sequence == 0 && initial.status == addon::Execution_context_status::CONFIRMED &&
+            initial.environment == "local" && initial.cwd == cwd && initial.source == "qwen.SessionStart",
+        "the native default keeps its exact nested path and belongs to the joint activation");
+    request.ledger.current_epoch = 1;
+    request.ledger.current_transition = addon::Ledger_transition{
+        addon::Transition_kind::START, first, request.transition_nonce};
+    request.transition_nonce = std::string(32, 'b');
+    request.event.body.set("session_id", qwen::Json(second));
+    request.event.body.set("event_id", qwen::Json("clear-b"));
+    request.event.body.set("source", qwen::Json("clear"));
+    // Qwen's SessionStart can still carry a departing conversation's prompt_id.
+    request.event.body.set("prompt_id", qwen::Json(first + "########1"));
+    result = invoke(addon::encode_classify_event_request(request));
+    ok &= check(result.classification == addon::Classification::TRANSITION &&
+            result.observations.front().provider_session_id == second && result.execution_updates.size() == 1 &&
+            result.observations.front().provider_turn_id.empty() &&
+            result.execution_updates.front().provider_session_id == second &&
+            result.execution_updates.front().transition_nonce == std::string(32, 'b'),
+        "clear associates the new native identity independently of an old prompt identifier");
+    request.ledger.current_epoch = 2;
+    request.ledger.current_transition = addon::Ledger_transition{
+        addon::Transition_kind::START, second, request.transition_nonce};
+    request.transition_nonce = std::string(32, 'c');
+    request.event.body.set("session_id", qwen::Json(first));
+    request.event.body.set("event_id", qwen::Json("resume-a"));
+    request.event.body.set("source", qwen::Json("resume"));
+    result = invoke(addon::encode_classify_event_request(request));
+    ok &= check(result.classification == addon::Classification::TRANSITION &&
+            result.transition == addon::Transition_kind::RESUME && result.execution_updates.size() == 1 &&
+            result.execution_updates.front().provider_session_id == first &&
+            result.execution_updates.front().transition_nonce == std::string(32, 'c'),
+        "returning A receives fresh native execution evidence under its new activation");
+    for (const auto& invalid : {qwen::Json(), qwen::Json(42), qwen::Json("relative/path"),
+            qwen::Json(cwd + "\n"), qwen::Json(std::string(4097, 'x'))})
+    {
+        auto unknown = request;
+        unknown.event.body.set("cwd", invalid);
+        result = invoke(addon::encode_classify_event_request(unknown));
+        ok &= check(result.classification == addon::Classification::TRANSITION &&
+                result.execution_updates.size() == 1 &&
+                result.execution_updates.front().status == addon::Execution_context_status::UNKNOWN &&
+                result.execution_updates.front().cwd.empty() && result.execution_updates.front().environment.empty(),
+            "missing or invalid native cwd stays unknown without suppressing the native identity");
+    }
+    auto missing = request;
+    missing.event.body.erase("cwd");
+    result = invoke(addon::encode_classify_event_request(missing));
+    ok &= check(result.execution_updates.size() == 1 &&
+            result.execution_updates.front().status == addon::Execution_context_status::UNKNOWN,
+        "an omitted cwd has no launch-directory or transcript-path fallback");
+    for (const auto* source : {"startup", "resume", "branch", "clear"}) {
+        auto child = request;
+        child.event.body.set("source", qwen::Json(source));
+        child.event.body.set("agent_id", qwen::Json("worker@team"));
+        result = invoke(addon::encode_classify_event_request(child));
+        ok &= check(result.observations.empty() && result.execution_updates.empty(),
+            "child starts cannot replace root identity or default directory");
+    }
+    auto current = request;
+    current.ledger.current_transition->provider_session_id = first;
+    for (const auto* source : {"compact", "resume"}) {
+        current.event.body.set("source", qwen::Json(source));
+        result = invoke(addon::encode_classify_event_request(current));
+        ok &= check(result.classification == addon::Classification::IGNORED && result.execution_updates.empty(),
+            "compaction and already-current native resume do not fabricate an activation snapshot");
+    }
+    auto delayed = request;
+    delayed.event.name = "SessionEnd";
+    delayed.event.body.set("reason", qwen::Json("clear"));
+    result = invoke(addon::encode_classify_event_request(delayed));
+    ok &= check(result.classification == addon::Classification::IGNORED && result.execution_updates.empty(),
+        "a late end for departed A cannot end B or move its execution context");
+    delayed.ledger.current_epoch = 3;
+    delayed.ledger.current_transition = addon::Ledger_transition{
+        addon::Transition_kind::RESUME, first, std::string(32, 'c')};
+    result = invoke(addon::encode_classify_event_request(delayed));
+    ok &= check(result.classification == addon::Classification::IGNORED && result.observations.empty() &&
+            result.execution_updates.empty(),
+        "a delayed clear-end remains inert after the same native identity is active again");
+    delayed.event.body.set("reason", qwen::Json("prompt_input_exit"));
+    result = invoke(addon::encode_classify_event_request(delayed));
+    ok &= check(result.observations.size() == 1 &&
+            result.observations.front().session_transition == addon::Session_transition::ENDED,
+        "an actual exit still ends the matching native conversation");
+    current.event.name = "PostToolUse";
+    current.event.body.set("cwd", qwen::Json(addon::path_to_utf8(root / "command override")));
+    result = invoke(addon::encode_classify_event_request(current));
+    ok &= check(result.execution_updates.empty(), "a per-command directory does not establish a new default");
+    auto unsupported = addon::encode_classify_event_request(request);
+    unsupported.set("execution_context", json_util::object({{"version", qwen::Json(99)}}));
+    result = invoke(unsupported);
+    ok &= check(result.classification == addon::Classification::TRANSITION &&
+            result.execution_updates.empty() && result.execution_failure &&
+            result.execution_failure->reason_code == addon::reason::k_unsupported_version,
+        "unsupported optional execution negotiation leaves the valid native identity transition intact");
+    int exit_code = -1;
+    ok &= check(host.shutdown(3000, &exit_code) && exit_code == 0, "execution-context package shuts down cleanly");
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -863,7 +1020,8 @@ int main(int argc, char** argv)
         result = launcher_approval_contract() && packaged_settings_and_approval(package, root) &&
                 settings_contract() && lifecycle_contract() &&
                 declared_profile_admits_every_shape(package) &&
-                attention_contract(package, root) && context_contract(package, root)
+                attention_contract(package, root) && context_contract(package, root) &&
+                execution_context_contract(package, root)
             ? 0 : 1;
     }
     catch (const std::exception& error) {

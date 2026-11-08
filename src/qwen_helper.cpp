@@ -1,5 +1,6 @@
 #include "qwen_json.h"
 #include "qwen_launcher.h"
+#include "qwen_resume.h"
 
 #include <logonomic_cli_addon/helper_client.h>
 #include <logonomic_cli_addon/ids.h>
@@ -7,6 +8,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <thread>
 #include <utility>
@@ -75,10 +77,19 @@ int main()
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(21);
     addon::Helper_client client(*environment, [&] { return std::chrono::steady_clock::now() >= deadline; });
     auto body = qwen::Json::object();
-    for (const auto* key : {"session_id", "prompt_id", "agent_id", "source", "reason", "notification_type"}) {
+    for (const auto* key : {"session_id", "prompt_id", "agent_id", "source", "reason", "notification_type",
+            "cwd", "transcript_path"})
+    {
         const auto value = json_util::text(*input, key);
         if (!value.empty()) {
             body.set(key, qwen::Json(value));
+        }
+    }
+    if (event == "SessionStart") {
+        // The native runtime store can differ from the account's global home.
+        // Only preparation's resolved profile supplies this part of the scope.
+        if (const auto* profile = std::getenv(qwen::k_profile_home_environment.data()); profile && *profile) {
+            body.set("profile_home", qwen::Json(profile));
         }
     }
     if (event == "Stop") {
