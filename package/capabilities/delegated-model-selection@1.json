@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "payload": {
+    "model": true,
+    "reasoning_effort": true
+  },
+  "capability_id": "delegated-model-selection"
+}

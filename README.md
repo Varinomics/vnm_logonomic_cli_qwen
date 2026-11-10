@@ -20,6 +20,18 @@ EOF; validated advisory output is drained through clean process exit before the
 result is released. Timeout, failed exit and incomplete final records fail the
 operation.
 
+`delegated-model-selection@1` replaces saved `--model`/`-m` options only for an
+explicit task model. Native reasoning effort is applied per session through ACP
+`session/set_config_option` without persistence metadata. The task waits for an
+exact effort acknowledgment; unsupported or clamped values fail before its
+prompt. The selected account, permission mode and saved defaults stay unchanged.
+Without task settings, the saved model and native defaults remain effective.
+An explicit model also sets Qwen's sole fallback to that same model, which its
+retry loop skips, so configured alternate models cannot silently take over.
+This requires native `--fallback-model` support. Model values with commas,
+surrounding whitespace or an option-like leading hyphen are refused because
+Qwen's option parser cannot preserve their exact fallback meaning.
+
 Delegated preparation configures each Task server in ACP `session/new` as the
 host relay with `--descriptor`, `--server`, a catalog receipt path and its
 nonce, and no environment, and acknowledges connection version 1; a request

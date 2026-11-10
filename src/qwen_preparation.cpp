@@ -257,7 +257,9 @@ void prepare_launch(addon::Invocation_context& invocation)
 
 template<class Request>
 std::optional<addon::Process_proposal> acp_process(
-    const Request& request, addon::Invocation_context& invocation)
+    const Request& request,
+    addon::Invocation_context& invocation,
+    const addon::Delegated_model_selection* selection = nullptr)
 {
     if (request.purpose != addon::Structured_purpose::IMPLEMENTATION || request.prompt.empty() ||
         !addon::is_valid_utf8(request.prompt) || !plain_session_options(request.context.launcher_argv))
@@ -269,6 +271,28 @@ std::optional<addon::Process_proposal> acp_process(
         profile.environment, request.context.working_directory, "--acp", invocation);
     if (!command) {
         return std::nullopt;
+    }
+    if (selection && selection->model) {
+        const auto& model = *selection->model;
+        // Qwen splits fallback values at commas and trims them. A sole fallback
+        // equal to the selected model is skipped by its native retry loop.
+        if (model.starts_with('-') || model.find(',') != std::string::npos || addon::trim(model) != model ||
+            model.starts_with("\xEF\xBB\xBF") || model.ends_with("\xEF\xBB\xBF") ||
+            !selected_program_supports(command->front(), profile.environment, request.context.working_directory,
+                {"--model", "--fallback-model"}, invocation))
+        {
+            return std::nullopt;
+        }
+        for (auto option = command->begin() + 1; option != command->end();) {
+            if (*option == "--model" || *option == "-m") {
+                option = command->erase(option, option + 2);
+            }
+            else {
+                option += *option == "--approval-mode" || *option == "--openai-api-key" ||
+                    *option == "--openai-base-url" ? 2 : 1;
+            }
+        }
+        command->insert(command->end(), {"--model", model, "--fallback-model", model});
     }
     command->push_back("--acp");
     command = platform_command(*command, profile.environment, request.context.working_directory);
@@ -317,6 +341,13 @@ void prepare_delegated(addon::Invocation_context& invocation)
         invocation.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
         return;
     }
+    constexpr addon::Delegated_model_selection_declaration selection_support{true, true};
+    if (request->model_selection &&
+        !addon::validate_delegated_model_selection(*request->model_selection, &selection_support, &failure))
+    {
+        invocation.fail(addon::Result_status::UNAVAILABLE, failure.reason_code, failure.detail);
+        return;
+    }
     if (!request->control.connection) {
         invocation.fail(addon::Result_status::UNAVAILABLE, "task_server_connection_unavailable");
         return;
@@ -324,14 +355,17 @@ void prepare_delegated(addon::Invocation_context& invocation)
     if (!bootstrap_available(request->context.launch_environment, invocation)) {
         return;
     }
-    const auto process = acp_process(*request, invocation);
+    const auto process = acp_process(*request, invocation,
+        request->model_selection ? &*request->model_selection : nullptr);
     if (!process) {
         invocation.fail(invocation.cancel_requested() ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,
-            invocation.cancel_requested() ? "cancelled" : "delegated_launcher_unavailable");
+            invocation.cancel_requested() ? "cancelled" : request->model_selection && request->model_selection->model
+                ? "model_selection_unavailable" : "delegated_launcher_unavailable");
         return;
     }
     const auto receipts = task_server_receipts(*request);
     addon::Delegated_prepare_result result;
+    result.model_selection = request->model_selection;
     result.process = *process;
     result.process.stdin_payload = initial_acp_input(*request, receipts);
     // Qwen otherwise discovers MCP servers after it answers session/new, and
@@ -340,7 +374,8 @@ void prepare_delegated(addon::Invocation_context& invocation)
     set_environment(result.process.environment, "QWEN_CODE_LEGACY_MCP_BLOCKING", "1");
     result.profile_storage = request->context.profile_storage;
     result.account_context = request->context.account_context;
-    result.inspection = {true, initial_acp_state(request->prompt, receipts), true};
+    result.inspection = {true, initial_acp_state(request->prompt, receipts,
+        request->model_selection ? &*request->model_selection : nullptr), true};
     result.acknowledgment.connection_version = addon::k_delegated_connection_version;
     for (const auto& receipt : receipts) {
         result.acknowledgment.server_ids.push_back(receipt.server_id);

@@ -23,7 +23,8 @@ std::vector<Task_server_receipt> task_server_receipts(const logonomic::cli_addon
 std::string initial_acp_input(const logonomic::cli_addon::Structured_prepare_request& request);
 std::string initial_acp_input(const logonomic::cli_addon::Delegated_prepare_request& request,
     const std::vector<Task_server_receipt>& receipts);
-std::string initial_acp_state(std::string_view prompt, const std::vector<Task_server_receipt>& receipts = {});
+std::string initial_acp_state(std::string_view prompt, const std::vector<Task_server_receipt>& receipts = {},
+    const logonomic::cli_addon::Delegated_model_selection* selection = nullptr);
 logonomic::cli_addon::Structured_inspect_result inspect_acp(
     const logonomic::cli_addon::Structured_inspection& inspection);
 

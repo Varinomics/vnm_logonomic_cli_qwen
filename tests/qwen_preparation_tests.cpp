@@ -194,6 +194,66 @@ void required_control_reaches_native_admission(const char* executable)
         expected.push_back("--acp");
         require(proposal && proposal->process.argv == expected, "launcher permission options are preserved in delegated ACP");
     }
+    for (const bool override_model : {false, true}) {
+        auto selected = request;
+        const std::vector<std::string> options{"--model", "old-model", "--openai-api-key", "--model",
+            "-m", "saved-model", "--approval-mode", "plan"};
+        for (const auto& option : options) selected.context.launcher.script_body += " " + option;
+        selected.context.launcher_argv.insert(selected.context.launcher_argv.end(), options.begin(), options.end());
+        if (override_model) selected.model_selection = addon::Delegated_model_selection{"task-model", "high"};
+        Context configured;
+        configured.m_request = {"delegated", {"delegated-session", 3}, "prepare",
+            addon::encode_delegated_prepare_request(selected)};
+        qwen::handle_preparation(configured);
+        const auto proposal = configured.m_result
+            ? addon::decode_delegated_prepare_result(*configured.m_result, &failure) : std::nullopt;
+        auto expected = override_model
+            ? std::vector<std::string>{addon::path_to_utf8(fake), "--openai-api-key", "--model", "--approval-mode", "plan",
+                "--model", "task-model", "--fallback-model", "task-model"}
+            : selected.context.launcher_argv;
+        expected.push_back("--acp");
+        require(proposal && proposal->process.argv == expected && proposal->model_selection == selected.model_selection &&
+            proposal->account_context && proposal->account_context->profile_path == home &&
+            proposal->account_context->adapter_account_key == selected.context.account_context->adapter_account_key &&
+            qwen::environment_value(proposal->process.environment, "QWEN_HOME") == home,
+            "requested model replaces saved aliases only and preserves account, permission mode and opaque option values");
+        require(selected.context.launcher_argv[selected.context.launcher_argv.size() - 3] == "saved-model",
+            "task settings do not mutate the saved launcher");
+    }
+    for (const std::string model : {"-other-option", " first-model", "first-model,second-model"}) {
+        auto selected = request;
+        selected.model_selection = addon::Delegated_model_selection{model, std::nullopt};
+        Context refused;
+        refused.m_request = {"delegated", {"delegated-session", 3}, "prepare",
+            addon::encode_delegated_prepare_request(selected)};
+        bool scoped_refusal = false;
+        try { qwen::handle_preparation(refused); }
+        catch (const std::runtime_error& error) { scoped_refusal = std::string(error.what()) == "model_selection_unavailable"; }
+        require(scoped_refusal && !refused.m_result,
+            "model syntax that cannot preserve sole-model fallback is refused before launch");
+    }
+    {
+        auto selected = request;
+        selected.model_selection = addon::Delegated_model_selection{std::nullopt, "high"};
+        Context configured;
+        configured.m_request = {"delegated", {"delegated-session", 3}, "prepare",
+            addon::encode_delegated_prepare_request(selected)};
+        qwen::handle_preparation(configured);
+        const auto proposal = configured.m_result
+            ? addon::decode_delegated_prepare_result(*configured.m_result, &failure) : std::nullopt;
+        require(proposal && proposal->process.argv == result->process.argv && proposal->process.environment == result->process.environment,
+            "effort-only selection leaves launcher, fallback and retry defaults unchanged");
+        selected.model_selection->model = "task-model";
+        selected.context.launch_environment->effective_environment.set("QWEN_TEST_HELP", addon::Json_value("  --acp\n  --model <name>\n"));
+        Context unavailable;
+        unavailable.m_request = {"delegated", {"delegated-session", 3}, "prepare",
+            addon::encode_delegated_prepare_request(selected)};
+        bool scoped_refusal = false;
+        try { qwen::handle_preparation(unavailable); }
+        catch (const std::runtime_error& error) { scoped_refusal = std::string(error.what()) == "model_selection_unavailable"; }
+        require(scoped_refusal && !unavailable.m_result,
+            "an installed CLI without sole-model fallback support cannot advertise an applied model");
+    }
     const auto& input = result->process.stdin_payload;
     require(input.find("qwen-host-authority-canary") == std::string::npos && input.find(request.prompt) == std::string::npos,
         "neither host credentials nor the task enter ACP stdin before admission");
@@ -831,7 +891,7 @@ int main(int argc, char** argv)
     if (qwen::base_name(argv[0]) == "qwen") {
         if (argc == 2 && std::string(argv[1]) == "--help") {
             const char* help = std::getenv("QWEN_TEST_HELP");
-            std::cout << (help ? help : "  --resume <session>\n  --acp\n");
+            std::cout << (help ? help : "  --resume <session>\n  --acp\n  --model <name>\n  --fallback-model <name>\n");
             return 0;
         }
         const char* home = std::getenv("QWEN_HOME");

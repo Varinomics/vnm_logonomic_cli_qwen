@@ -73,8 +73,47 @@ void launcher_permissions()
         "missing plain allow-once refuses instead of selecting a persistent or mode-changing approval");
 }
 
+void task_model_selection()
+{
+    const addon::Delegated_model_selection selection{"task-model", "high"};
+    const auto setup = inspect(provider::initial_acp_state("TASK PAYLOAD", {}, &selection), initialize + new_session);
+    require(!setup.failure_reason && setup.stdin_bytes && setup.stdin_bytes->find("session/set_config_option") != std::string::npos &&
+        setup.stdin_bytes->find(R"("configId":"reasoning_effort","value":"high")") != std::string::npos &&
+        setup.stdin_bytes->find("_meta") == std::string::npos && setup.stdin_bytes->find("TASK PAYLOAD") == std::string::npos,
+        "effort is configured per session without persistence metadata before the task");
+    const std::string acknowledged = R"({"jsonrpc":"2.0","id":3,"result":{"configOptions":[{"id":"reasoning_effort","currentValue":"high"}]}})" "\n";
+    for (std::size_t split = 1; split < acknowledged.size(); ++split) {
+        const auto first = inspect(setup.protocol_state, acknowledged.substr(0, split));
+        require(!first.failure_reason && !first.stdin_bytes, "partial effort acknowledgment holds the task");
+        const auto second = inspect(first.protocol_state, acknowledged.substr(split));
+        require(!second.failure_reason && second.stdin_bytes && second.stdin_bytes->find("TASK PAYLOAD") != std::string::npos &&
+            second.stdin_bytes->find(R"("id":5)") != std::string::npos, "exact effort acknowledgment releases the task once");
+    }
+    const auto prompt = inspect(setup.protocol_state, acknowledged);
+    const auto finished = inspect(prompt.protocol_state, model_text +
+        R"({"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}})" "\n");
+    require(!finished.failure_reason && finished.close_stdin && inspect(finished.protocol_state, "", true).result_bytes == "ANSWER",
+        "configured task retains clean-exit completion");
+    require(inspect(setup.protocol_state,
+        R"({"jsonrpc":"2.0","id":3,"result":{"configOptions":[{"id":"reasoning_effort","currentValue":"medium"}]}})" "\n").failure_reason ==
+        "reasoning_effort_unavailable", "a clamped effort never releases the task");
+    require(inspect(setup.protocol_state,
+        R"({"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"Unsupported effort"}})" "\n").failure_reason ==
+        "reasoning_effort_unavailable", "native unsupported effort is a scoped refusal");
+    require(inspect(setup.protocol_state, acknowledged + model_text).failure_reason.has_value(),
+        "a pre-request answer cannot authenticate a configured task");
+    const std::string changed = R"({"jsonrpc":"2.0","method":"qwen/notify/session/model-update","params":{"v":1,"sessionId":"s","currentModelId":"other"}})" "\n";
+    require(inspect(prompt.protocol_state, changed).failure_reason == "model_selection_unavailable",
+        "an observed change to an explicitly requested model cannot silently succeed");
+    const addon::Delegated_model_selection effort_only{std::nullopt, "high"};
+    const auto effort = inspect(provider::initial_acp_state("TASK PAYLOAD", {}, &effort_only), initialize + new_session);
+    require(!effort.failure_reason && effort.stdin_bytes == setup.stdin_bytes,
+        "effort-only selection uses the native default model");
+}
+
 int main() {
     launcher_permissions();
+    task_model_selection();
     const auto setup=inspect(provider::initial_acp_state("TASK PAYLOAD"),initialize);
     require(!setup.stdin_bytes && !setup.failure_reason, "initialize awaits the session");
     // A whole frame and every strict prefix have the same causal meaning.

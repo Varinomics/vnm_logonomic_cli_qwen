@@ -211,6 +211,7 @@ int main()
         {addon::k_attention_kind_capability_id, addon::k_attention_kind_version},
         {"environment-bootstrap", 1},
         {"structured-session", 3}, {"delegated-session", 3},
+        {addon::k_delegated_model_selection_capability_id, addon::k_delegated_model_selection_version},
         {"interactive-resume", 2}, {"interactive-resume", 3}, {"interactive-resume", 4},
     };
     addon::Adapter_runtime runtime(std::move(options));

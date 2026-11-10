@@ -83,6 +83,21 @@ bool response(const Json& value, int expected)
         json_util::member(value, "result").is_object();
 }
 
+bool configuration_matches(const Json& value, std::string_view id, std::string_view expected)
+{
+    const auto& options = json_util::member(value, "configOptions");
+    if (!options.is_array()) return false;
+    bool matched = false;
+    for (const auto& option : options.as_array()) {
+        if (!option.is_object()) return false;
+        if (json_util::text(option, "id") == id) {
+            if (matched || json_util::text(option, "currentValue") != expected) return false;
+            matched = true;
+        }
+    }
+    return matched;
+}
+
 std::optional<const char*> response_failure(const Json& value, int expected)
 {
     if (!json_util::exact_keys(value, {"jsonrpc", "id", "error"}) || json_util::text(value, "jsonrpc") != "2.0" ||
@@ -219,7 +234,7 @@ bool valid_standard_notification(
     const auto type = json_util::text(update, "sessionUpdate");
     if (type == "available_commands_update") return stage != "await_initialize" && valid_commands(update);
     if (type == "current_mode_update") {
-        return (stage == "await_new" || stage == "await_prompt") &&
+        return (stage == "await_new" || stage == "await_effort" || stage == "await_prompt") &&
             json_util::only_keys(update, {"sessionUpdate", "currentModeId", "_meta"}) && optional_object(update, "_meta") &&
             json_util::bounded_string(json_util::member(update, "currentModeId"), 64);
     }
@@ -260,13 +275,13 @@ bool valid_private_notification(const Json& value, std::string_view stage, std::
     if (session != announced_session) return false;
     const auto method = json_util::text(value, "method");
     if (method == "qwen/notify/session/mode-update") {
-        return (stage == "await_new" || stage == "await_prompt") &&
+        return (stage == "await_new" || stage == "await_effort" || stage == "await_prompt") &&
             json_util::exact_keys(params, {"v", "sessionId", "currentModeId"}) && json_util::member(params, "v").is_integer() &&
             json_util::member(params, "v").as_integer() == 1 && json_util::bounded_string(json_util::member(params, "currentModeId"), 64);
     }
     const bool setup_notification = method == "qwen/notify/session/mcp-budget-event" ||
         method == "qwen/notify/session/sources-changed";
-    if (setup_notification) return stage == "await_new" || stage == "await_prompt";
+    if (setup_notification) return stage == "await_new" || stage == "await_effort" || stage == "await_prompt";
     if (stage != "await_prompt") return false;
     return method == "qwen/notify/session/prompt-suggestion" ||
         method == "qwen/notify/session/title-update" || method == "qwen/notify/session/pr-binding" ||
@@ -475,7 +490,8 @@ std::string initial_acp_input(const addon::Delegated_prepare_request& request, c
     return initial_acp_input(request.context, std::move(servers));
 }
 
-std::string initial_acp_state(std::string_view prompt, const std::vector<Task_server_receipt>& receipts)
+std::string initial_acp_state(std::string_view prompt, const std::vector<Task_server_receipt>& receipts,
+    const addon::Delegated_model_selection* selection)
 {
     auto expected = Json::array();
     auto tools = Json::array();
@@ -483,17 +499,22 @@ std::string initial_acp_state(std::string_view prompt, const std::vector<Task_se
         for (const auto& tool : receipt.tool_names) tools.push_back(Json(tool));
         expected.push_back(json_util::object({{"path", Json(receipt.path)}, {"nonce", Json(receipt.nonce)}}));
     }
-    return addon::serialize_json(json_util::object({{"stage", Json("await_initialize")}, {"pending_base64", Json("")},
+    auto state = json_util::object({{"stage", Json("await_initialize")}, {"pending_base64", Json("")},
         {"deferred_input_base64", Json("")},
         {"prompt_base64", Json(addon::encode_base64(prompt))}, {"session_id", Json("")},
-        {"result_base64", Json("")}, {"receipts", std::move(expected)}, {"task_tools", std::move(tools)}}));
+        {"result_base64", Json("")}, {"receipts", std::move(expected)}, {"task_tools", std::move(tools)}});
+    if (selection) {
+        state.set("model_selection", addon::encode_delegated_model_selection(*selection));
+        state.set("native_model", Json(""));
+    }
+    return addon::serialize_json(state);
 }
 
 addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection& inspection)
 {
     auto parsed = addon::parse_exchange_protocol_state(inspection.protocol_state);
-    if (!parsed || !json_util::exact_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id",
-            "result_base64", "receipts", "task_tools"}) ||
+    if (!parsed || !json_util::only_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id",
+            "result_base64", "receipts", "task_tools", "model_selection", "native_model"}) ||
         !json_util::member(*parsed, "stage").is_string() || !json_util::bounded_string(json_util::member(*parsed, "session_id"), 512, true) ||
         !valid_receipts(json_util::member(*parsed, "receipts"))) {
         return failure("malformed_acp_state");
@@ -502,10 +523,21 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
     for (const auto& tool : json_util::member(*parsed, "task_tools").as_array()) {
         if (!json_util::bounded_string(tool, 64)) return failure("malformed_acp_state");
     }
+    addon::Delegated_model_selection selection;
+    if (const auto* record = parsed->find("model_selection")) {
+        addon::Contract_failure error;
+        const auto decoded = addon::decode_delegated_model_selection(*record, &error);
+        if (!decoded || !json_util::bounded_string(json_util::member(*parsed, "native_model"), 1024, true)) {
+            return failure("malformed_acp_state");
+        }
+        selection = *decoded;
+    }
+    else if (parsed->find("native_model")) return failure("malformed_acp_state");
+    const int prompt_id = selection.reasoning_effort ? 5 : 4;
     auto state = std::move(*parsed);
     const auto initial_stage = json_util::text(state, "stage");
     if (initial_stage != "await_initialize" && initial_stage != "await_new" &&
-        initial_stage != "await_prompt" &&
+        initial_stage != "await_prompt" && initial_stage != "await_effort" &&
         initial_stage != "await_drain") return failure("malformed_acp_state");
     for (const auto key : {"pending_base64", "deferred_input_base64", "prompt_base64", "result_base64"}) {
         if (!json_util::member(state, key).is_string()) return failure("malformed_acp_state");
@@ -518,11 +550,20 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
     const auto state_session = json_util::text(state, "session_id");
     if ((initial_stage == "await_initialize" && (!state_session.empty() || !output->empty())) ||
         (initial_stage == "await_new" && !output->empty()) ||
+        (initial_stage == "await_effort" && (!selection.reasoning_effort || state_session.empty() || !output->empty())) ||
         ((initial_stage == "await_prompt" || initial_stage == "await_drain") &&
             (state_session.empty() || !prompt->empty())) ||
         (initial_stage == "await_drain" && output->empty())) {
         return failure("malformed_acp_state");
     }
+    const auto release_prompt = [&]() {
+        state.set("stage", Json("await_prompt"));
+        state.set("prompt_base64", Json(""));
+        auto content = Json::array();
+        content.push_back(json_util::object({{"type", Json("text")}, {"text", Json(*prompt)}}));
+        return rpc(prompt_id, "session/prompt", json_util::object({{"sessionId", json_util::member(state, "session_id")},
+            {"prompt", std::move(content)}}));
+    };
     *pending += inspection.stdout_bytes;
     // A reply proposed while a native record is incomplete has not been
     // written yet. Retain that causal boundary across inspection calls.
@@ -545,6 +586,11 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         if (!value || !value->is_object()) return failure("invalid_acp_record");
         auto stage   = json_util::text(state, "stage");
         auto session = json_util::text(state, "session_id");
+        if (selection.model && json_util::text(*value, "method") == "qwen/notify/session/model-update" &&
+            json_util::text(json_util::member(*value, "params"), "currentModelId") != json_util::text(state, "native_model"))
+        {
+            return failure("model_selection_unavailable");
+        }
         if (completed) {
             if (!valid_drain_notification(*value, session)) {
                 return failure("out_of_order_acp_response");
@@ -579,8 +625,11 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
             state.set("session_id", Json(session));
             continue;
         }
-        const int expected = stage == "await_initialize" ? 1 : stage == "await_new" ? 2 : 4;
-        if (const auto reason = response_failure(*value, expected)) return failure(*reason);
+        const int expected = stage == "await_initialize" ? 1 : stage == "await_new" ? 2 : stage == "await_effort" ? 3 : prompt_id;
+        if (const auto reason = response_failure(*value, expected)) {
+            return failure(stage == "await_effort" && std::string_view(*reason) == "acp_request_failed"
+                ? "reasoning_effort_unavailable" : *reason);
+        }
         if (!input.empty()) return failure("out_of_order_acp_response");
         const auto& result = json_util::member(*value, "result");
         if (stage == "await_initialize") {
@@ -595,16 +644,26 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
             if (!receipts_hold_nonces(json_util::member(state, "receipts"))) return failure("task_servers_not_ready");
             state.set("session_id", json_util::member(result, "sessionId"));
             if (prompt->empty() || !addon::is_valid_utf8(*prompt)) return failure("invalid_acp_prompt");
-            state.set("stage", Json("await_prompt"));
-            state.set("prompt_base64", Json(""));
-            auto content = Json::array();
-            content.push_back(json_util::object({{"type", Json("text")}, {"text", Json(*prompt)}}));
-            input = rpc(4, "session/prompt", json_util::object({{"sessionId", json_util::member(state, "session_id")},
-                {"prompt", std::move(content)}}));
+            if (selection.model || selection.reasoning_effort) {
+                state.set("native_model", json_util::member(json_util::member(result, "models"), "currentModelId"));
+            }
+            if (selection.reasoning_effort) {
+                // Qwen persists effort only with an explicit persistence metadata flag.
+                state.set("stage", Json("await_effort"));
+                input = rpc(3, "session/set_config_option", json_util::object({{"sessionId", json_util::member(state, "session_id")},
+                    {"configId", Json("reasoning_effort")}, {"value", Json(*selection.reasoning_effort)}}));
+            }
+            else input = release_prompt();
+        }
+        else if (stage == "await_effort") {
+            if (!response(*value, 3) || !configuration_matches(result, "reasoning_effort", *selection.reasoning_effort)) {
+                return failure("reasoning_effort_unavailable");
+            }
+            input = release_prompt();
         }
         else if (stage == "await_prompt") {
             // Qwen Code 0.24 adds `_meta`, its checkpoint branch point, to the reply.
-            if (!response(*value, 4) || !json_util::only_keys(result, {"stopReason", "_meta"}) || !optional_object(result, "_meta")) {
+            if (!response(*value, prompt_id) || !json_util::only_keys(result, {"stopReason", "_meta"}) || !optional_object(result, "_meta")) {
                 return failure("invalid_acp_completion");
             }
             if (json_util::text(result, "stopReason") == "cancelled") return failure("acp_cancelled");
