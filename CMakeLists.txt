@@ -197,6 +197,15 @@ if(LOGONOMIC_CLI_ADDON_RECIPE_TESTS)
         TIMEOUT 1800 RESOURCE_LOCK cli_addon_recipe_rebuild LABELS "cli-addon;delivery;recipe;owning-path")
 endif()
 # Contract and recipe tests must not be confused with real native qualification.
+if(WIN32)
+    add_executable(qwen_native_path_tests tests/qwen_native_path_tests.cpp)
+    target_link_libraries(qwen_native_path_tests PRIVATE
+        qwen_provider logonomic_cli_addon_sdk::test_support)
+    qwen_target(qwen_native_path_tests)
+    add_dependencies(qwen_native_path_tests qwen_package)
+    add_test(NAME qwen_native_path_tests COMMAND qwen_native_path_tests "${QWEN_PACKAGE_DIRECTORY}")
+    set_tests_properties(qwen_native_path_tests PROPERTIES TIMEOUT 120 LABELS "usage;filesystem;packaged-adapter")
+endif()
 get_directory_property(_provider_tests TESTS)
 set_property(TEST ${_provider_tests} APPEND PROPERTY LABELS "cli-addon;provider-contract")
 

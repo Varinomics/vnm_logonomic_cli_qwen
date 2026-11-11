@@ -116,12 +116,13 @@ struct Source_index
 
 std::optional<Source_fingerprint> source_fingerprint(const fs::path& path)
 {
+    const auto io_path = native_io_path(path);
     std::error_code error;
-    const auto bytes = fs::file_size(path, error);
+    const auto bytes = fs::file_size(io_path, error);
     if (error || bytes > k_max_exact) {
         return std::nullopt;
     }
-    const auto modified = fs::last_write_time(path, error);
+    const auto modified = fs::last_write_time(io_path, error);
     if (error) {
         return std::nullopt;
     }
@@ -267,8 +268,9 @@ bool read_line(std::istream& input, std::string* line, Budget& budget, addon::In
 template<class Consumer>
 bool read_objects(const fs::path& path, Budget& budget, addon::Invocation_context& context, Consumer consume)
 {
-    if (!fs::is_regular_file(path)) throw Usage_error("usage_source_unavailable");
-    std::ifstream input(path, std::ios::binary);
+    const auto io_path = native_io_path(path);
+    if (!fs::is_regular_file(io_path)) throw Usage_error("usage_source_unavailable");
+    std::ifstream input(io_path, std::ios::binary);
     if (!input) throw Usage_error("usage_source_unavailable");
     std::string line;
     bool complete = true;
@@ -576,7 +578,7 @@ bool collect_summaries(
     std::uint64_t staged_summary_bytes = 0;
     bool summaries_complete = true;
     bool retained_complete = true;
-    if (fs::exists(history)) {
+    if (fs::exists(native_io_path(history))) {
         bool understood = true;
         const bool framed = read_objects(history, budget, context, [&](const Json& row) {
             if (integer(json_util::member(row, "version")) != 1) {
@@ -643,7 +645,7 @@ void collect(
     const fs::path& home, Evidence& evidence, Budget& budget,
     addon::Invocation_context& context, Source_index* source_index)
 {
-    if (!fs::is_directory(home)) throw Usage_error("usage_profile_unavailable");
+    if (!fs::is_directory(native_io_path(home))) throw Usage_error("usage_profile_unavailable");
     initialize_evidence_budget(evidence, budget, context);
     Source_index previous;
     if (source_index) {
@@ -667,18 +669,21 @@ void collect(
     // usageHistoryService owns exactly global/projects/*/chats/*.jsonl.
     // QWEN_RUNTIME_DIR and nested debug/artifact files are not recovery inputs.
     const auto projects = home / "projects";
-    if (fs::is_directory(projects)) for (const auto& project : fs::directory_iterator(projects)) {
+    const auto io_projects = native_io_path(projects);
+    if (fs::is_directory(io_projects)) for (const auto& project : fs::directory_iterator(io_projects)) {
         check_cancel(context);
         budget.entry();
-        const auto chats = project.path() / "chats";
-        if (!fs::is_directory(chats)) continue;
-        for (const auto& entry : fs::directory_iterator(chats)) {
+        const auto chats = projects / project.path().filename() / "chats";
+        const auto io_chats = native_io_path(chats);
+        if (!fs::is_directory(io_chats)) continue;
+        for (const auto& entry : fs::directory_iterator(io_chats)) {
             check_cancel(context);
             budget.entry();
             const auto name = path_string(entry.path().filename());
             if (!name.ends_with(".jsonl") || name.ends_with(".ledger.jsonl") || !entry.is_regular_file()) continue;
-            const auto path = path_string(entry.path());
-            const auto fingerprint = source_index ? source_fingerprint(entry.path()) : std::nullopt;
+            const auto source = chats / entry.path().filename();
+            const auto path = path_string(source);
+            const auto fingerprint = source_index ? source_fingerprint(source) : std::nullopt;
             const auto saved = previous.files.find(path);
             if (fingerprint && saved != previous.files.end() && same_source(*fingerprint, saved->second)) {
                 if (!saved->second.session.empty() && !seen.insert(saved->second.session).second) {
@@ -688,8 +693,8 @@ void collect(
                 continue;
             }
             std::string session_id;
-            const auto complete = append_transcript(entry.path(), evidence, seen, budget, context, session_id);
-            auto after = fingerprint ? source_fingerprint(entry.path()) : std::nullopt;
+            const auto complete = append_transcript(source, evidence, seen, budget, context, session_id);
+            auto after = fingerprint ? source_fingerprint(source) : std::nullopt;
             if (complete && fingerprint && after && same_source(*fingerprint, *after)) {
                 after->session = std::move(session_id);
                 remember_source(*source_index, path, std::move(*after));
