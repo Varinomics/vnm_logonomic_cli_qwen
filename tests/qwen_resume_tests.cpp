@@ -248,6 +248,14 @@ void scope_contract(const fs::path& root)
     Resume_fixture other(root / "other");
     write(original.source, rows({original.row("user", {}, "user")}));
     write(other.source, rows({other.row("title", {}, "system", "custom_title")}));
+    auto directory_spelling = addon::path_to_utf8(original.cwd / ".." / "." / "nested") + "//";
+#ifdef _WIN32
+    std::replace(directory_spelling.begin(), directory_spelling.end(), '\\', '/');
+#endif
+    auto same_project = original.context;
+    same_project.working_directory = directory_spelling;
+    expect(qwen::inspect_resume(same_project, original.record), Availability::AVAILABLE, Content::NONEMPTY, true,
+        "equivalent directory spelling finds the captured native project and conversation");
     expect(qwen::inspect_resume(other.context, original.record), Availability::UNKNOWN, Content::UNKNOWN, false,
         "same UUID in another profile cannot satisfy captured native provenance");
 

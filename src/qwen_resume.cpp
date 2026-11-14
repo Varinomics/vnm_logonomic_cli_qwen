@@ -4,6 +4,7 @@
 #include "qwen_conversation.h"
 #include "qwen_profile.h"
 
+#include <logonomic_cli_addon/launcher_utilities.h>
 #include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/package_source.h>
 
@@ -437,17 +438,16 @@ Resume_inspection inspect_resume(const addon::Session_launch_context& context, c
             result.preparation_failure = "qwen_resume_scope_mismatch";
             return result;
         }
-        auto cwd = addon::path_from_utf8(context.working_directory);
-        if (!cwd.is_absolute() || context.launcher_argv.empty() || !plain_session_options(context.launcher_argv)) {
+        const auto cwd = addon::normalized_resume_directory(context.working_directory);
+        if (!cwd || context.launcher_argv.empty() || !plain_session_options(context.launcher_argv)) {
             return result;
         }
-        cwd = cwd.lexically_normal().make_preferred();
-        const auto project = path_string(cwd);
+        const auto project = path_string(*cwd);
         if (provenance && !project_matches(json::text(*provenance, "cwd"), project)) {
             result.preparation_failure = "qwen_resume_scope_mismatch";
             return result;
         }
-        const auto runtime = runtime_directory(profile, cwd);
+        const auto runtime = runtime_directory(profile, *cwd);
         const auto directory = project_directory_name(project);
         if (!runtime || !directory || (cancelled && cancelled())) {
             return result;

@@ -9,6 +9,7 @@
 #include "qwen_session_wake.h"
 
 #include <logonomic_cli_addon/launch_preparation.h>
+#include <logonomic_cli_addon/launcher_utilities.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
 
@@ -400,12 +401,19 @@ void prepare_resume(addon::Invocation_context& invocation)
         invocation.fail(addon::Result_status::UNAVAILABLE, "resume_selector_unavailable");
         return;
     }
-    const auto profile = profile_for_context(request->context);
+    const auto directory = addon::normalized_resume_directory(request->context.working_directory);
+    if (!directory) {
+        invocation.fail(addon::Result_status::FAILED, "invalid_resume_directory");
+        return;
+    }
+    auto launch_context = request->context;
+    launch_context.working_directory = addon::path_to_utf8(*directory);
+    const auto profile = profile_for_context(launch_context);
 #ifdef _WIN32
     std::optional<Powershell_selection> powershell;
-    if (request->context.launcher.runner_key == addon::k_runner_powershell) {
-        powershell = inspect_powershell_launcher(request->context.launcher, request->context.launcher_argv,
-            profile.environment, request->context.working_directory, invocation);
+    if (launch_context.launcher.runner_key == addon::k_runner_powershell) {
+        powershell = inspect_powershell_launcher(launch_context.launcher, launch_context.launcher_argv,
+            profile.environment, launch_context.working_directory, invocation);
         if (!powershell) {
             invocation.fail(addon::Result_status::UNAVAILABLE, "resume_selector_unavailable");
             return;
@@ -413,8 +421,8 @@ void prepare_resume(addon::Invocation_context& invocation)
     }
     else
 #endif
-    if (request->context.launcher.runner_key != addon::k_runner_direct ||
-        !plain_session_options(request->context.launcher_argv))
+    if (launch_context.launcher.runner_key != addon::k_runner_direct ||
+        !plain_session_options(launch_context.launcher_argv))
     {
         invocation.fail(addon::Result_status::UNAVAILABLE, "resume_selector_unavailable");
         return;
@@ -431,7 +439,7 @@ void prepare_resume(addon::Invocation_context& invocation)
         invocation.fail(addon::Result_status::UNAVAILABLE, "managed_hooks_unavailable");
         return;
     }
-    auto inspection_context = request->context;
+    auto inspection_context = launch_context;
 #ifdef _WIN32
     if (powershell) {
         inspection_context.launcher.runner_key = addon::k_runner_direct;
@@ -453,7 +461,7 @@ void prepare_resume(addon::Invocation_context& invocation)
 #ifdef _WIN32
     if (powershell) {
         if (selected_program_supports(powershell->program, profile.environment,
-            request->context.working_directory, {"--resume"}, invocation))
+            launch_context.working_directory, {"--resume"}, invocation))
         {
             command = powershell_session_command(*powershell, {"--resume", session});
         }
@@ -461,11 +469,11 @@ void prepare_resume(addon::Invocation_context& invocation)
     else
 #endif
     {
-        command = verified_command(request->context.launcher, request->context.launcher_argv,
-            profile.environment, request->context.working_directory, "--resume", invocation);
+        command = verified_command(launch_context.launcher, launch_context.launcher_argv,
+            profile.environment, launch_context.working_directory, "--resume", invocation);
         if (command) {
             command->insert(command->end(), {"--resume", session});
-            command = platform_command(*command, profile.environment, request->context.working_directory);
+            command = platform_command(*command, profile.environment, launch_context.working_directory);
         }
     }
     if (!command) {
@@ -482,7 +490,7 @@ void prepare_resume(addon::Invocation_context& invocation)
     result.patch.profile_storage = request->context.profile_storage;
     result.patch.account_context = request->context.account_context;
     if (request->context.session_wake) {
-        result.patch.session_wake = prepare_session_wake(request->context);
+        result.patch.session_wake = prepare_session_wake(launch_context);
         if (result.patch.session_wake->available) {
             result.patch.set.emplace_back(k_wake_binding_environment, json_util::text(result.patch.session_wake->binding, "launch_token"));
         }

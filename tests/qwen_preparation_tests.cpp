@@ -564,6 +564,10 @@ void resume_policy(const char* executable)
             {"profile_home", addon::Json_value(home)}});
         retained.resume_record = qwen::make_resume_record("019933a1-6e43-7102-a520-b3c8294cc763", native);
         require(retained.resume_record.find("native_source"), "retained resume fixture carries native scope");
+        retained.context.working_directory = addon::path_to_utf8(root / "selected" / ".." / ".") + "//";
+#ifdef _WIN32
+        std::replace(retained.context.working_directory.begin(), retained.context.working_directory.end(), '\\', '/');
+#endif
         Context retained_context;
         retained_context.m_request = {"resume-retained", {"interactive-resume", 2}, "prepare_resume",
             addon::encode_resume_prepare_request(retained, 2)};
@@ -574,7 +578,7 @@ void resume_policy(const char* executable)
             addon::validate_resume_acknowledgment(retained.resume_record, proposal->acknowledgment, &failure) &&
             qwen::environment_value(proposal->patch.set, "QWEN_RUNTIME_DIR") == addon::path_to_utf8(runtime) &&
             qwen::environment_value(proposal->patch.set, qwen::k_profile_home_environment) == home,
-            "enriched resume prepares its exact native runtime and acknowledges the complete selected record");
+            "equivalent directory spelling preserves the exact native runtime and selected record");
     }
     {
         auto mismatched = request;
