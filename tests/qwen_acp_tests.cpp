@@ -326,7 +326,7 @@ void authentication_catalog_is_advisory()
         "an unused future auth-method catalog does not reject native session authentication");
 }
 
-void work_accounting_requires_complete_negotiated_coverage()
+void work_accounting_negotiates_native_coverage()
 {
     addon::Structured_prepare_request request;
     request.context.working_directory = "/work/repository";
@@ -345,9 +345,6 @@ void work_accounting_requires_complete_negotiated_coverage()
     capability.erase("categories");
     invalid.push_back(capability);
     capability = wire::active_work_capability();
-    capability.set("categories", parse(R"(["agent","notification"])"));
-    invalid.push_back(capability);
-    capability = wire::active_work_capability();
     capability.find("categories")->push_back(Json("agent"));
     invalid.push_back(capability);
     for (const auto& interval : {Json(0), Json(4999), Json(60001), Json(5000.5), Json("5000")}) {
@@ -360,8 +357,29 @@ void work_accounting_requires_complete_negotiated_coverage()
     invalid.push_back(capability);
     for (const auto& rejected : invalid) {
         require(inspect(qwen::initial_acp_state("Task"), wire::initialize_response(rejected)).failure_reason ==
-            "acp_active_work_unavailable", "incomplete or malformed native coverage fails before releasing the task");
+            "acp_active_work_unavailable", "malformed native coverage fails before releasing the task");
     }
+
+    // Released Qwen 0.24.3 echoes five categories, before native tool holds
+    // were introduced. Conditional close still checks every native hold.
+    capability = wire::active_work_capability();
+    capability.set("categories", parse(R"(["agent","notification","shell","session","workflow"])"));
+    auto released = parse(wire::initialize_response(capability));
+    released.find("result")->find("agentInfo")->set("version", Json("0.24.3"));
+    auto result = inspect(qwen::initial_acp_state("Task"), wire::record(released) + new_session_response());
+    require(!result.failure_reason && result.stdin_bytes &&
+        result.stdin_bytes->find("session/prompt") != std::string::npos,
+        "Qwen 0.24.3 five-category negotiation must release the prompt");
+    result = inspect(result.protocol_state, wire::message("Done.") + wire::prompt_response() + wire::active_work(1));
+    require_close(result);
+    result = inspect(result.protocol_state, wire::close_response(
+        "session-alpha", 6, false, wire::one_hold("tool", "native-tool")));
+    require_waiting(result, "native close refusal remains authoritative for an unreported hold category");
+    result = inspect(result.protocol_state, wire::active_work(2));
+    require_close(result, 7);
+    result = inspect(result.protocol_state, wire::close_response("session-alpha", 7));
+    require(result.close_stdin && !result.complete && !result.failure_reason,
+        "only native close acknowledgment permits EOF with subset coverage");
 
     capability = wire::active_work_capability();
     capability.find("categories")->push_back(Json("future-work"));
@@ -373,6 +391,22 @@ void work_accounting_requires_complete_negotiated_coverage()
         "startup snapshots may precede initialize and additive coverage remains compatible");
     require_waiting(inspect(accepted.protocol_state, wire::message("Done.") + wire::prompt_response()),
         "the startup channel snapshot does not prove the new session is idle");
+}
+
+void default_child_type_is_not_root_output()
+{
+    // Qwen's SubAgentTracker uses an empty type when Agent omitted its
+    // optional subagent_type; parentToolCallId still attributes the child.
+    auto response = inspect(prompt_state(),
+        wire::message("Default child output.", json_util::object({
+            {"parentToolCallId", Json("call-agent")}, {"subagentType", Json("")}})) +
+        wire::message("Parent answer.") + wire::prompt_response() + wire::active_work(1));
+    require(!response.failure_reason, "native empty subagentType must not reject an authenticated child message");
+    require_close(response);
+    response = inspect(response.protocol_state, wire::close_response());
+    response = inspect(response.protocol_state, {}, true);
+    require(response.complete && !response.failure_reason && response.result_bytes == "Parent answer.",
+        "an omitted native subagent type must neither fail the task nor leak child output");
 }
 
 void only_fresh_ordered_root_snapshots_allow_close()
@@ -450,11 +484,40 @@ std::string background_response(std::string_view text, bool complete, bool parti
             {"turnId", Json(std::string(turn))}, {"turnComplete", Json(complete)}, {"partial", Json(partial)}})}}));
 }
 
-std::string background_end(std::string_view reason = "end_turn")
+std::string background_end(std::string_view reason = "end_turn", std::string_view turn = "background-1")
 {
     return wire::record(json_util::object({{"jsonrpc", Json("2.0")}, {"method", Json("_qwencode/end_turn")},
         {"params", json_util::object({{"sessionId", Json("session-alpha")}, {"source", Json("background_notification")},
-            {"turnId", Json("background-1")}, {"reason", Json(std::string(reason))}})}}));
+            {"turnId", Json(std::string(turn))}, {"reason", Json(std::string(reason))}})}}));
+}
+
+void textless_intermediate_turns_retain_later_synthesis()
+{
+    auto result = inspect(prompt_state(), wire::message("Initial answer. ") +
+        wire::active_work(1, "session-alpha", wire::one_hold()) + wire::prompt_response());
+    result = inspect(result.protocol_state, background_start());
+    result = inspect(result.protocol_state, background_end() +
+        wire::active_work(2, "session-alpha", wire::one_hold("agent", "later-child")));
+    require_waiting(result, "a textless intermediate parent turn must retain other native child work");
+    const auto incomplete_state = result.protocol_state;
+
+    result = inspect(result.protocol_state, background_start("session-alpha", "later-turn"));
+    require(!result.failure_reason, "a later parent turn can consume the retained child-result history");
+    result = inspect(result.protocol_state,
+        wire::message("Native diagnostic display.") +
+        background_response("Final synthesis.", true, false, "later-turn") +
+        background_end("end_turn", "later-turn") + wire::active_work(3));
+    require_close(result);
+    result = inspect(result.protocol_state, wire::close_response());
+    result = inspect(result.protocol_state, {}, true);
+    require(result.complete && !result.failure_reason && result.result_bytes == "Initial answer. Final synthesis.",
+        "later typed synthesis completes the task without native diagnostic displays");
+
+    result = inspect(incomplete_state, wire::active_work(3));
+    require_close(result);
+    result = inspect(result.protocol_state, wire::close_response());
+    require(result.failure_reason == "acp_background_incomplete",
+        "a final textless turn still cannot establish successful synthesis");
 }
 
 void delayed_children_require_parent_synthesis()
@@ -504,8 +567,10 @@ void delayed_children_require_parent_synthesis()
         "background cancellation cannot be hidden by the preliminary answer");
     require(inspect(pending.protocol_state, background_response("", true) + background_end("max_tokens")).failure_reason ==
         "acp_background_incomplete", "a nonterminal synthesis stop cannot produce success");
-    require(inspect(pending.protocol_state, wire::message("[notification error] model unavailable") + background_end() +
-        wire::active_work(2)).failure_reason == "acp_background_incomplete",
+    auto failed = inspect(pending.protocol_state,
+        wire::message("[notification error] model unavailable") + background_end() + wire::active_work(2));
+    require_close(failed);
+    require(inspect(failed.protocol_state, wire::close_response()).failure_reason == "acp_background_incomplete",
         "native failure before the first synthesis segment lacks typed completion and cannot succeed");
     require(inspect(pending.protocol_state, background_response("Wrong turn.", true, false, "foreign-turn")).failure_reason ==
         "invalid_acp_background_turn", "synthesis completion belongs to the admitted native turn");
@@ -725,8 +790,10 @@ int main()
     authenticated_transcript_completes();
     completion_is_independent_of_stdout_chunks();
     authentication_catalog_is_advisory();
-    work_accounting_requires_complete_negotiated_coverage();
+    work_accounting_negotiates_native_coverage();
+    default_child_type_is_not_root_output();
     only_fresh_ordered_root_snapshots_allow_close();
+    textless_intermediate_turns_retain_later_synthesis();
     delayed_children_require_parent_synthesis();
     native_background_admission_retries_are_idempotent();
     conditional_close_handles_races_and_invalid_responses();

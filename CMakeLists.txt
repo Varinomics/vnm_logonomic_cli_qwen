@@ -227,6 +227,10 @@ if(QWEN_NATIVE_TEST_COMMAND)
         COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/qwen_acp_native_tests.py"
             "${QWEN_PACKAGE_DIRECTORY}" "$<TARGET_FILE:qwen_contract_tests>"
             -- ${QWEN_NATIVE_TEST_COMMAND})
-    set_tests_properties(qwen_acp_native_tests PROPERTIES
+    add_test(NAME qwen_acp_textless_intermediate_native_tests
+        COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/qwen_acp_native_tests.py"
+            --textless-intermediate "${QWEN_PACKAGE_DIRECTORY}" "$<TARGET_FILE:qwen_contract_tests>"
+            -- ${QWEN_NATIVE_TEST_COMMAND})
+    set_tests_properties(qwen_acp_native_tests qwen_acp_textless_intermediate_native_tests PROPERTIES
         TIMEOUT 180 SKIP_RETURN_CODE 77 LABELS "cli-addon;native-acceptance;acp")
 endif()

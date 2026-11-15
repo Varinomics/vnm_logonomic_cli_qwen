@@ -15,15 +15,24 @@ once per request, and rejects every other permission request once. It never
 selects persistent approval or an approval that switches modes. A launcher
 that needs file edits or commands must grant them itself. These operations
 require `structured-session@3` and, for delegation,
-`delegated-session@3`. ACP negotiates Qwen's complete active-work heartbeat,
-including parent-turn accounting, before sending the prompt. A root `end_turn`
+`delegated-session@3`. ACP negotiates Qwen's active-work heartbeat before sending
+the prompt, accepting the categories the native version reports. A root `end_turn`
 keeps native stdin open while background children and the parent turns consuming
 their results remain active. Only fresh, ordered root accounting permits a
 native `qwen/control/session/close` request with `onlyIfUnheld` and `requireFlush`;
-the native close acknowledgment establishes the final ownership boundary.
+native close checks all work holds, including categories absent from the heartbeat.
+Its acknowledgment establishes the final ownership boundary.
 Validated root output is drained through clean process exit before the result is
-released. Child output remains internal to the native delegation. Missing work
-accounting, timeout, failed exit and incomplete final records fail the operation.
+released. Child output remains internal to the native delegation. Missing negotiation
+or invalid accounting, timeout, failed exit and incomplete final records fail the operation.
+
+A background service that never exits can retain a native shell hold indefinitely.
+The task remains open until that work ends or the task is cancelled; the provider
+does not impose a task-duration limit or force-close native work. A textless
+intermediate automatic turn can be followed by successful typed parent synthesis.
+If the final automatic turn has no typed completion, the task reports incomplete:
+Qwen gives the same end marker to a successful textless turn and an error before
+its first response.
 
 `delegated-model-selection@1` replaces saved `--model`/`-m` options only for an
 explicit task model. Native reasoning effort is applied per session through ACP
@@ -219,22 +228,9 @@ receipt boundary, not idle-turn scheduling in the actual Qwen terminal UI.
 
 Set `QWEN_NATIVE_TEST_COMMAND` to a CMake list containing an installed Qwen
 command and its arguments to register the opt-in Linux x86-64 native tests.
-`qwen_acp_native_tests` runs the real provider's `prepare`/`inspect` path through
-a persistent SDK host simulator in `qwen_contract_tests` against that CLI and a
-loopback model. It holds a native background child until the first parent `end_turn`, then verifies the final
-parent synthesis, conditional session close, and EOF after acknowledgment. Its
-disposable profile explicitly selects default approval mode and allows `Agent`;
-this does not change production permission policy or user settings. It needs no
-model account or API spend and does not install Qwen. The supplied package is
-copied intact and validated by the SDK before the native exchange; every adapter
-invocation uses that same negotiated generation. This tests native ACP behavior,
-not shipping package qualification. To retain its protocol,
-model, and SDK evidence, run the fixture directly:
-
-```sh
-python3 -B tests/qwen_acp_native_tests.py --output-dir /existing/evidence-directory \
-  /path/to/provider-package /path/to/qwen_contract_tests -- /path/to/qwen
-```
+They use isolated profiles and a loopback model without a model account or API
+spend. Native ACP scenarios and evidence-retention instructions are documented in
+[`tests/qwen_acp_native_tests.py`](tests/qwen_acp_native_tests.py).
 
 ## Source provenance
 
