@@ -11,7 +11,7 @@ import tempfile
 def main():
     package = Path(sys.argv[1]).resolve()
     wrapper = Path(sys.argv[2]).resolve()
-    helper = package / "helpers" / ("qwen_helper.exe" if os.name == "nt" else "qwen_helper")
+    helper = package / "adapter" / ("qwen_helper.exe" if os.name == "nt" else "qwen_helper")
     session = "12345678-1234-4234-8234-123456789abc"
     with tempfile.TemporaryDirectory(prefix="qwen-helper-") as temporary:
         root = Path(temporary).resolve()

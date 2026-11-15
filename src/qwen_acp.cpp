@@ -222,11 +222,8 @@ std::optional<std::int64_t> active_work_interval(const Json& result)
             return std::nullopt;
         }
     }
-    for (const auto category : k_active_work_categories) {
-        if (!accepted.contains(std::string(category))) {
-            return std::nullopt;
-        }
-    }
+    // Native echoes its supported categories, which can be a subset of the
+    // request. Conditional close checks all native holds, including unreported ones.
     return interval.as_integer();
 }
 
@@ -351,7 +348,7 @@ std::optional<bool> root_message(const Json& update)
     bool child = false;
     for (const auto key : {"parentToolCallId", "subagentType"}) {
         if (meta.find(key)) {
-            if (!json_util::bounded_string(json_util::member(meta, key), 1024)) {
+            if (!json_util::bounded_string(json_util::member(meta, key), 1024, key == std::string_view("subagentType"))) {
                 return std::nullopt;
             }
             child = true;
@@ -432,7 +429,7 @@ bool valid_plan(const Json& update)
 }
 
 bool valid_standard_notification(
-    const Json& value, std::string_view stage, std::string& session, std::string& output)
+    const Json& value, std::string_view stage, std::string& session, std::string& output, bool automatic_turn)
 {
     const auto& params = json_util::member(value, "params");
     if (!json_util::exact_keys(value, {"jsonrpc", "method", "params"}) || json_util::text(value, "jsonrpc") != "2.0" ||
@@ -464,7 +461,11 @@ bool valid_standard_notification(
             if (!root) {
                 return false;
             }
-            if (*root) {
+            // Automatic model responses carry a native source tag. Untyped
+            // messages in that turn include native error and diagnostic displays.
+            if (*root && (!automatic_turn ||
+                json_util::text(json_util::member(update, "_meta"), "source") == "background_notification_response"))
+            {
                 output += json_util::member(json_util::member(update, "content"), "text").as_string();
             }
         }
@@ -526,7 +527,7 @@ bool valid_drain_notification(const Json& value, std::string session)
         const bool advisory = type == "available_commands_update" || type == "current_mode_update" ||
             type == "config_option_update" || type == "session_info_update";
         std::string ignored_output;
-        return advisory && valid_standard_notification(value, "await_prompt", session, ignored_output);
+        return advisory && valid_standard_notification(value, "await_prompt", session, ignored_output, false);
     }
     if (!json_util::exact_keys(value, {"jsonrpc", "method", "params"}) || json_util::text(value, "jsonrpc") != "2.0" ||
         !params.is_object() || json_util::text(params, "sessionId") != session)
@@ -657,7 +658,7 @@ std::optional<const char*> observe_background_turn(const Json& value, Json& stat
                 return "invalid_acp_background_turn";
             }
             state.set("background_turn", params);
-            state.set("background_turn_complete", Json(false));
+            state.set("background_synthesis_complete", Json(false));
         }
         else
         if (method == "_qwencode/end_turn") {
@@ -673,14 +674,10 @@ std::optional<const char*> observe_background_turn(const Json& value, Json& stat
             if (reason != "end_turn") {
                 return "acp_background_incomplete";
             }
-            // Native errors before the first response segment can still end
-            // with reason=end_turn. Require the typed synthesis completion,
-            // never an error's human-readable text or the first parent reply.
-            if (!json_util::member(state, "background_turn_complete").as_boolean()) {
-                return "acp_background_incomplete";
-            }
+            // A textless turn and an error before its first response have the
+            // same end marker. Retain native work so a later parent turn can
+            // consume the shared history; require typed synthesis at final close.
             state.set("background_turn", Json::object());
-            state.set("background_turn_complete", Json(false));
         }
     }
     const auto& update = json_util::member(params, "update");
@@ -697,7 +694,7 @@ std::optional<const char*> observe_background_turn(const Json& value, Json& stat
         if (const auto* partial = task.find("partial"); partial && partial->as_boolean()) {
             return "acp_background_incomplete";
         }
-        state.set("background_turn_complete", json_util::member(task, "turnComplete"));
+        state.set("background_synthesis_complete", json_util::member(task, "turnComplete"));
     }
     return std::nullopt;
 }
@@ -843,7 +840,7 @@ std::string initial_acp_state(std::string_view prompt, const std::vector<Task_se
         {"prompt_base64", Json(addon::encode_base64(prompt))}, {"session_id", Json("")},
         {"result_base64", Json("")}, {"receipts", std::move(expected)}, {"task_tools", std::move(tools)},
         {"active_work", encode_active_work({})}, {"background_turn", Json::object()},
-        {"background_turn_complete", Json(false)}});
+        {"background_synthesis_complete", Json(true)}});
     if (selection) {
         state.set("model_selection", addon::encode_delegated_model_selection(*selection));
         state.set("native_model", Json(""));
@@ -858,17 +855,16 @@ addon::Structured_inspect_result inspect_acp(
     auto parsed = addon::parse_exchange_protocol_state(inspection.protocol_state);
     if (!parsed || !json_util::only_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id",
             "result_base64", "receipts", "task_tools", "model_selection", "native_model", "active_work", "background_turn",
-            "background_turn_complete"}) ||
+            "background_synthesis_complete"}) ||
         !json_util::member(*parsed, "stage").is_string() || !json_util::bounded_string(json_util::member(*parsed, "session_id"), 512, true) ||
         !json_util::member(*parsed, "background_turn").is_object() ||
-        !json_util::member(*parsed, "background_turn_complete").is_boolean() ||
+        !json_util::member(*parsed, "background_synthesis_complete").is_boolean() ||
         !valid_receipts(json_util::member(*parsed, "receipts"))) {
         return failure("malformed_acp_state");
     }
     const auto& saved_turn = json_util::member(*parsed, "background_turn");
-    if (saved_turn.as_object().empty()
-            ? json_util::member(*parsed, "background_turn_complete").as_boolean()
-            : !background_turn_params(saved_turn, json_util::text(*parsed, "session_id")))
+    if (!saved_turn.as_object().empty() &&
+        !background_turn_params(saved_turn, json_util::text(*parsed, "session_id")))
     {
         return failure("malformed_acp_state");
     }
@@ -989,7 +985,7 @@ addon::Structured_inspect_result inspect_acp(
                     }
                     if (admitted.as_object().empty()) {
                         state.set("background_turn", params);
-                        state.set("background_turn_complete", Json(false));
+                        state.set("background_synthesis_complete", Json(false));
                     }
                     // Qwen retries the same retained turn when admission times
                     // out. Reply to the current RPC id without resetting any
@@ -1014,7 +1010,8 @@ addon::Structured_inspect_result inspect_acp(
                     return failure("out_of_order_acp_notification");
                 }
             }
-            if (!valid_standard_notification(*value, stage, session, *output) &&
+            const bool automatic_turn = !json_util::member(state, "background_turn").as_object().empty();
+            if (!valid_standard_notification(*value, stage, session, *output, automatic_turn) &&
                 !valid_private_notification(*value, stage, session)) return failure("unauthenticated_acp_notification");
             state.set("session_id", Json(session));
             if (const auto reason = observe_background_turn(*value, state)) {
@@ -1089,6 +1086,9 @@ addon::Structured_inspect_result inspect_acp(
             if (json_util::member(result, "closed").as_boolean()) {
                 if (result.find("holds") || !json_util::text(json_util::member(state, "background_turn"), "turnId").empty()) {
                     return failure("invalid_acp_close");
+                }
+                if (!json_util::member(state, "background_synthesis_complete").as_boolean()) {
+                    return failure("acp_background_incomplete");
                 }
                 if (output->empty()) {
                     return failure("invalid_acp_completion");

@@ -1,6 +1,8 @@
 #include "qwen_observer.h"
 #include "qwen_json.h"
 #include "qwen_launcher.h"
+#include "qwen_metadata_file_p.h"
+#include "qwen_profile.h"
 
 #include <logonomic_cli_addon/lifecycle_correlation_lifetime.h>
 #include <logonomic_cli_addon/lifecycle_events.h>
@@ -12,12 +14,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <future>
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <source_location>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -214,13 +218,17 @@ public:
             addon::serialize_json_canonical(record));
     }
 
-    addon::Poll_observations_result await_page(std::size_t count, const std::string& cursor = {})
+    addon::Poll_observations_result await_page(std::size_t count, const std::string& cursor = {},
+        const std::source_location location = std::source_location::current())
     {
         std::optional<addon::Poll_observations_result> result;
-        require(wait_until([&] {
+        if (!wait_until([&] {
             result = poll(m_observer, m_nonce, cursor);
             return result && result->observations.size() == count;
-        }), "native metadata must reach the bounded observation queue");
+        })) {
+            throw std::runtime_error("native metadata must reach the bounded observation queue at " +
+                std::string(location.function_name()) + ':' + std::to_string(location.line()));
+        }
         return *result;
     }
 
@@ -360,6 +368,24 @@ void resumes_do_not_reuse_stale_terminal_evidence()
     const auto paused = fixture.await_page(1, retry.resume_cursor);
     require(paused.observations.front().agent_id == retry.observations.front().agent_id,
         "fresh terminal metadata can settle the attempt after a failed resume-count write");
+
+    write_bytes(fixture.metadata_path("resumable"), "{\"agentId\":");
+    fixture.m_observer.classify(fixture.hook("SubagentStart", "resumable"));
+    const auto unreadable_start = fixture.await_page(1, paused.resume_cursor);
+    fixture.metadata("resumable", "paused", 1, "2026-11-15T12:00:04.000Z");
+    // Admission takes the observer lock after the recovery write. The scan
+    // that closes this sibling therefore cannot be an earlier in-flight scan.
+    fixture.metadata("recovery-barrier", "running", 0, k_created);
+    fixture.m_observer.classify(fixture.hook("SubagentStart", "recovery-barrier"));
+    fixture.metadata("recovery-barrier", "completed", 0, "2026-11-15T12:00:05.000Z");
+    const auto recovery = fixture.await_page(2, unreadable_start.resume_cursor);
+    require(recovery.observations.front().agent_id == recovery.observations.back().agent_id &&
+        recovery.observations.back().subagent_transition == addon::Subagent_transition::STOPPED,
+        "an unreadable start snapshot cannot turn a recovered old terminal record into a new STOP");
+    fixture.metadata("resumable", "paused", 1, "2026-11-15T12:00:05.000Z");
+    const auto fresh = fixture.await_page(1, recovery.resume_cursor);
+    require(fresh.observations.front().agent_id == unreadable_start.observations.front().agent_id,
+        "fresh post-recovery terminal evidence settles the resumed attempt");
 }
 
 void metadata_cannot_admit_another_attempt()
@@ -504,16 +530,91 @@ void invalid_metadata_does_not_fabricate_completion()
 {
     Fixture fixture;
     fixture.metadata("corrupt-child", "running", 0, k_created);
+    fixture.metadata("healthy-child", "running", 0, k_created);
     fixture.m_observer.classify(fixture.hook("SubagentStart", "corrupt-child"));
+    fixture.m_observer.classify(fixture.hook("SubagentStart", "healthy-child"));
     Observe_window window(fixture);
-    fixture.await_page(1);
-    write_bytes(fixture.metadata_path("corrupt-child"), "{\"agentId\":");
-    require(window.m_worker.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
-        "an invalid published sidecar fails native child observation");
-    require(window.m_context.m_status == addon::Result_status::FAILED &&
-        window.m_context.m_failure == "subagent_metadata_identity_invalid",
-        "corrupt metadata reports failure rather than a fabricated STOP");
-    require(!poll(fixture.m_observer, fixture.m_nonce), "loss cannot masquerade as an empty successful inventory");
+    const auto started = fixture.await_page(2);
+    const auto path = fixture.metadata_path("corrupt-child");
+    for (const auto& bad_record : {
+            std::string("{\"agentId\":"),
+            addon::serialize_json_canonical(json::object({
+                {"agentId", Json("corrupt-child")}, {"parentSessionId", Json(k_session)},
+                {"createdAt", Json(k_created)}, {"lastUpdatedAt", Json(k_created)},
+                {"resumeCount", Json(0.0)}, {"status", Json("unknown-native-status")}})),
+            addon::serialize_json_canonical(json::object({
+                {"agentId", Json("corrupt-child")}, {"parentSessionId", Json(k_session)},
+                {"createdAt", Json(k_created)}, {"lastUpdatedAt", Json(k_created)},
+                {"status", Json("completed")}}))})
+    {
+        const auto before = fixture.await_capture();
+        write_bytes(path, bad_record);
+        fixture.await_capture(before);
+        const auto pending = poll(fixture.m_observer, fixture.m_nonce, started.resume_cursor);
+        require(pending && pending->observations.empty(),
+            "unreadable child metadata leaves the child open and the observation cursor usable");
+        const auto root_stop = fixture.m_observer.classify(fixture.hook("Stop"));
+        require(root_stop.observations.size() == 1 &&
+            root_stop.observations.front().phase_transition == addon::Phase_transition::AWAITING_INPUT,
+            "a bad child record does not degrade root turn tracking");
+    }
+
+    const auto before_io_error = fixture.await_capture();
+    fs::remove(path);
+    fs::create_directory(path);
+    fixture.await_capture(before_io_error);
+    const auto pending = poll(fixture.m_observer, fixture.m_nonce, started.resume_cursor);
+    require(pending && pending->observations.empty(),
+        "a child metadata I/O error does not fail the terminal observer");
+
+    fixture.metadata("healthy-child", "completed", 0, "2026-11-15T12:00:01.000Z");
+    const auto healthy = fixture.await_page(1, started.resume_cursor);
+    require(healthy.observations.front().agent_id == started.observations[1].agent_id,
+        "another child's completion remains observable while the bad record is unavailable");
+
+    fs::remove(path);
+    fixture.metadata("corrupt-child", "completed", 0, "2026-11-15T12:00:02.000Z");
+    const auto recovered = fixture.await_page(1, healthy.resume_cursor);
+    require(recovered.observations.front().subagent_transition == addon::Subagent_transition::STOPPED &&
+        recovered.observations.front().agent_id == started.observations.front().agent_id,
+        "a later valid snapshot closes the original child without restarting the observer");
+}
+
+void invalid_metadata_at_start_keeps_the_admitted_child()
+{
+    Fixture fixture;
+    write_bytes(fixture.metadata_path("starting-child"), "{\"agentId\":");
+    fixture.m_observer.classify(fixture.hook("SubagentStart", "starting-child"));
+    Observe_window window(fixture);
+    const auto started = fixture.await_page(1);
+    require(started.observations.front().subagent_transition == addon::Subagent_transition::STARTED,
+        "the authenticated start does not depend on reading the child's metadata");
+    fixture.metadata("starting-child", "running", 0, k_created);
+    fixture.metadata("recovery-barrier", "running", 0, k_created);
+    fixture.m_observer.classify(fixture.hook("SubagentStart", "recovery-barrier"));
+    fixture.metadata("recovery-barrier", "completed", 0, "2026-11-15T12:00:01.000Z");
+    const auto recovery = fixture.await_page(2, started.resume_cursor);
+    fixture.metadata("starting-child", "completed", 0, "2026-11-15T12:00:01.000Z");
+    const auto stopped = fixture.await_page(1, recovery.resume_cursor);
+    require(stopped.observations.front().agent_id == started.observations.front().agent_id,
+        "metadata recovery finishes the child admitted while its record was unavailable");
+}
+
+void metadata_reads_allow_atomic_replacement()
+{
+    // Oracle: native writeAgentMeta publishes through rename-over while an
+    // observer may still have the previous metadata generation open.
+    Fixture fixture;
+    const auto path = fixture.metadata_path("atomic-child");
+    const std::string original = "original metadata generation";
+    write_bytes(path, original);
+    auto input = qwen::detail::open_metadata_file(qwen::native_io_path(path));
+    require(input != nullptr, "open the production metadata reader");
+    write_bytes(path, "replacement metadata generation");
+    std::string retained(original.size() + 1, '\0');
+    retained.resize(std::fread(retained.data(), 1, retained.size(), input.get()));
+    require(!std::ferror(input.get()) && retained == original,
+        "native replacement succeeds while the observer finishes reading its original snapshot");
 }
 
 } // namespace
@@ -521,7 +622,9 @@ void invalid_metadata_does_not_fabricate_completion()
 int main()
 {
     try {
-        watch_continuation_is_independent_of_consumption();
+        invalid_metadata_does_not_fabricate_completion();
+        invalid_metadata_at_start_keeps_the_admitted_child();
+        metadata_reads_allow_atomic_replacement();
         stopped_hooks_do_not_end_active_children();
         fast_children_and_authenticated_inventory();
         resumes_do_not_reuse_stale_terminal_evidence();
@@ -529,7 +632,7 @@ int main()
         directory_replacement_and_native_unicode_names();
         terminal_page_and_retirement();
         cancellation_and_cursor_isolation();
-        invalid_metadata_does_not_fabricate_completion();
+        watch_continuation_is_independent_of_consumption();
         return 0;
     }
     catch (const std::exception& error) {

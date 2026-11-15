@@ -16,6 +16,27 @@ constexpr const char* k_events[] = {
     "Notification", "SubagentStart", "SubagentStop",
 };
 
+#ifdef _WIN32
+constexpr const char* k_helper_shell = "powershell";
+constexpr const char* k_helper_command = "if ($env:LOGONOMIC_PROVIDER_HELPERS_DIR) { "
+    "& (Join-Path (Split-Path -LiteralPath $env:LOGONOMIC_PROVIDER_HELPERS_DIR) 'adapter/qwen_helper.exe') }";
+constexpr const char* k_separate_helper_command =
+    "if ($env:LOGONOMIC_PROVIDER_HELPERS_DIR) { & (Join-Path $env:LOGONOMIC_PROVIDER_HELPERS_DIR 'qwen_helper.exe') }";
+#else
+constexpr const char* k_helper_shell = "bash";
+constexpr const char* k_helper_command = "if [ -n \"$LOGONOMIC_PROVIDER_HELPERS_DIR\" ]; then "
+    "\"${LOGONOMIC_PROVIDER_HELPERS_DIR%/*}/adapter/qwen_helper\"; fi";
+constexpr const char* k_separate_helper_command =
+    "if [ -n \"$LOGONOMIC_PROVIDER_HELPERS_DIR\" ]; then \"$LOGONOMIC_PROVIDER_HELPERS_DIR/qwen_helper\"; fi";
+#endif
+
+Json hook_definition(std::string_view event, const char* command)
+{
+    return json_util::object({{"hooks", Json(Json::Array{json_util::object({{"type", Json("command")},
+        {"name", Json("logonomic:qwen:" + std::string(event))}, {"command", Json(command)},
+        {"shell", Json(k_helper_shell)}, {"timeout", Json(25.0)}})})}});
+}
+
 struct value_span_t
 {
     std::string name;
@@ -167,24 +188,50 @@ public:
             throw std::runtime_error("invalid_hooks_array");
         }
         const auto expected = logonomic::cli_addon::serialize_json_canonical(hook_entry(event));
+        const auto separate_helper = logonomic::cli_addon::serialize_json_canonical(
+            hook_definition(event, k_separate_helper_command));
         bool found = false;
+        auto cursor = skip(span.begin + 1);
+        auto replacement_begin = span.end;
+        auto replacement_end = span.end;
         for (const auto& entry : array.as_array()) {
+            const auto entry_end = end(cursor);
             const auto& hooks = json_util::member(entry, "hooks");
             if (hooks.is_array()) {
                 for (const auto& hook : hooks.as_array()) {
                     if (json_util::text(hook, "name") == "logonomic:qwen:" + std::string(event)) {
                         // Ownership covers the whole exact definition, including
                         // its matcher and execution policy, never a name alone.
-                        if (found || logonomic::cli_addon::serialize_json_canonical(entry) != expected) {
+                        const auto definition = logonomic::cli_addon::serialize_json_canonical(entry);
+                        if (found || (definition != expected && definition != separate_helper)) {
                             throw std::runtime_error("modified_managed_hook");
                         }
                         found = true;
+                        if (definition == separate_helper) {
+                            // Exact ownership establishes one hook. Replace only
+                            // its command value so comments inside it survive.
+                            const auto wrapper_members = members(cursor);
+                            const auto hook_members = members(skip(wrapper_members.front().begin + 1));
+                            const auto command = std::find_if(hook_members.begin(), hook_members.end(),
+                                [](const auto& member) { return member.name == "command"; });
+                            replacement_begin = command->begin;
+                            replacement_end = command->end;
+                        }
                     }
                 }
             }
+            cursor = skip(entry_end);
+            if (m_json.at(cursor) == ',') {
+                cursor = skip(cursor + 1);
+            }
         }
         if (found) {
-            return m_source.substr(span.begin, span.end - span.begin);
+            auto result = m_source.substr(span.begin, span.end - span.begin);
+            if (replacement_begin != span.end) {
+                result.replace(replacement_begin - span.begin, replacement_end - replacement_begin,
+                    logonomic::cli_addon::serialize_json_canonical(Json(k_helper_command)));
+            }
+            return result;
         }
         const auto closing = span.end - 1;
         auto previous = closing;
@@ -218,16 +265,7 @@ private:
 
 Json hook_entry(std::string_view event)
 {
-#ifdef _WIN32
-    const char* shell = "powershell";
-    const char* command = "if ($env:LOGONOMIC_PROVIDER_HELPERS_DIR) { & (Join-Path $env:LOGONOMIC_PROVIDER_HELPERS_DIR 'qwen_helper.exe') }";
-#else
-    const char* shell = "bash";
-    const char* command = "if [ -n \"$LOGONOMIC_PROVIDER_HELPERS_DIR\" ]; then \"$LOGONOMIC_PROVIDER_HELPERS_DIR/qwen_helper\"; fi";
-#endif
-    return json_util::object({{"hooks", Json(Json::Array{json_util::object({{"type", Json("command")},
-        {"name", Json("logonomic:qwen:" + std::string(event))}, {"command", Json(command)},
-        {"shell", Json(shell)}, {"timeout", Json(25.0)}})})}});
+    return hook_definition(event, k_helper_command);
 }
 
 Json parse_settings(std::string_view settings)

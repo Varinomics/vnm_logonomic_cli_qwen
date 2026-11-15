@@ -11,7 +11,7 @@ import tempfile
 def main():
     package = Path(sys.argv[1]).resolve()
     transport = Path(sys.argv[2]).resolve()
-    helper = package / "helpers" / ("qwen_helper.exe" if os.name == "nt" else "qwen_helper")
+    helper = package / "adapter" / ("qwen_helper.exe" if os.name == "nt" else "qwen_helper")
     # Native hookEventHandler creates these fields once per hook invocation.
     # The helper owns transport retries; Qwen supplies no hook replay identity.
     common = {
@@ -34,7 +34,7 @@ def main():
             "LOGONOMIC_PROVIDER_PACKAGE_ID": "logonomic.cli.qwen",
             "LOGONOMIC_PROVIDER_GENERATION_DIGEST": "d" * 64,
             "LOGONOMIC_PROVIDER_GENERATION_NONCE": "e" * 32,
-            "LOGONOMIC_PROVIDER_HELPERS_DIR": str(helper.parent),
+            "LOGONOMIC_PROVIDER_HELPERS_DIR": str(package / "helpers"),
         })
         identities = set()
         for index, event in enumerate(events):

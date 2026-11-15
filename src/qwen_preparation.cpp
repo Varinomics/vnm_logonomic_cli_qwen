@@ -33,9 +33,9 @@ namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
 
 #ifdef _WIN32
-constexpr const char* k_bridge = "helpers/qwen_launch_bridge.exe";
+constexpr const char* k_bridge = "adapter/qwen_launch_bridge.exe";
 #else
-constexpr const char* k_bridge = "helpers/qwen_launch_bridge";
+constexpr const char* k_bridge = "adapter/qwen_launch_bridge";
 #endif
 
 bool bootstrap_available(const std::optional<addon::Launch_environment>& environment,

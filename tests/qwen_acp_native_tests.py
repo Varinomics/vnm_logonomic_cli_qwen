@@ -2,6 +2,20 @@
 
 Use an installed Qwen command and an SDK-valid provider package. This exercises
 the real adapter's prepare/inspect path; it does not qualify shipping packaging.
+
+The persistent SDK Host_simulator in qwen_contract_tests validates an intact copy
+of that package and uses one negotiated generation throughout the exchange. A
+loopback model holds the background child until the first parent end_turn, then
+checks final synthesis, conditional close, and EOF after acknowledgment. With
+--textless-intermediate, a second child waits until an earlier automatic turn
+has completed without response text; final typed synthesis must still succeed.
+
+The disposable profile selects default approval mode and allows Agent. It changes
+no user settings or production permission policy, installs nothing, and needs no
+model account or API spend. Retain protocol, model, and SDK evidence with:
+
+python3 -B tests/qwen_acp_native_tests.py --output-dir /existing/evidence-directory \
+  /path/to/provider-package /path/to/qwen_contract_tests -- /path/to/qwen
 """
 
 import argparse
@@ -27,6 +41,7 @@ from qwen_native_test_support import native_environment, send_model_response
 
 ROOT_PROMPT = "NATIVE_ROOT_LIFETIME_FIXTURE"
 CHILD_PROMPT = "NATIVE_CHILD_DELAYED_FIXTURE"
+LATER_CHILD_PROMPT = "NATIVE_LATER_CHILD_FIXTURE"
 EXPECTED_ANSWER = "INITIAL_PARENT_COMPLETIONFINAL_PARENT_SYNTHESIS"
 
 
@@ -67,6 +82,7 @@ def run_native(args, root, workspace, socket_root):
     launcher.write_text("#!/bin/sh\nexec " + shlex.join(args.native_command) + ' "$@"\n')
     launcher.chmod(0o700)
     parent_responded, background_admitted, child_replied = (threading.Event() for _ in range(3))
+    textless_turn_finished, later_child_replied = (threading.Event() for _ in range(2))
     record_lock = threading.Lock()
     model_requests, model_errors = [], []
     model_progress = {"discovered": False, "spawned": False}
@@ -92,7 +108,10 @@ def run_native(args, root, workspace, socket_root):
                 last_user = users[-1] if users else ""
                 root_request = ROOT_PROMPT in "\n".join(users)
                 tool_names = [tool.get("function", {}).get("name") for tool in request.get("tools", [])]
-                if CHILD_PROMPT in last_user and ROOT_PROMPT not in last_user:
+                if LATER_CHILD_PROMPT in last_user and ROOT_PROMPT not in last_user:
+                    require(textless_turn_finished.wait(45), "earlier textless parent turn never completed")
+                    message, role = {"role": "assistant", "content": "NATIVE_LATER_CHILD_FINISHED"}, "later-child"
+                elif CHILD_PROMPT in last_user and ROOT_PROMPT not in last_user:
                     require(parent_responded.wait(45), "parent never completed while its native child was blocked")
                     message, role = {"role": "assistant", "content": "NATIVE_CHILD_FINISHED"}, "child"
                 elif root_request and not model_progress["discovered"]:
@@ -102,15 +121,26 @@ def run_native(args, root, workspace, socket_root):
                         "function": {"name": "tool_search", "arguments": json.dumps({"query": "select:agent"})}}]}
                     role = "discover"
                 elif root_request and not model_progress["spawned"]:
-                    require("tool_call" in tool_names, "native deferred tool bridge unavailable: " + str(tool_names))
+                    tool_name = "agent" if "agent" in tool_names else "tool_call"
+                    require(tool_name in tool_names, "native Agent tool unavailable: " + str(tool_names))
                     model_progress["spawned"] = True
-                    message = {"role": "assistant", "tool_calls": [{"index": 0, "id": "fixture-agent-call", "type": "function",
-                        "function": {"name": "tool_call", "arguments": json.dumps({"name": "agent", "arguments": {
-                            "description": "Delayed native fixture child", "prompt": CHILD_PROMPT,
-                            "run_in_background": True}})}}]}
+                    children = [("fixture-agent-call", "Delayed native fixture child", CHILD_PROMPT)]
+                    if args.textless_intermediate:
+                        children.append(("fixture-later-agent-call", "Later native fixture child", LATER_CHILD_PROMPT))
+                    message = {"role": "assistant", "tool_calls": []}
+                    for index, (call_id, description, prompt) in enumerate(children):
+                        arguments = {"description": description, "prompt": prompt, "run_in_background": True}
+                        if tool_name == "tool_call":
+                            arguments = {"name": "agent", "arguments": arguments}
+                        message["tool_calls"].append({"index": index, "id": call_id, "type": "function",
+                            "function": {"name": tool_name, "arguments": json.dumps(arguments)}})
                     role = "spawn"
                 elif root_request and background_admitted.is_set():
-                    message, role = {"role": "assistant", "content": "FINAL_PARENT_SYNTHESIS"}, "synthesis"
+                    if args.textless_intermediate and not textless_turn_finished.is_set():
+                        message, role = {"role": "assistant", "content": "",
+                                         "reasoning_content": "Wait for the other child's result."}, "textless"
+                    else:
+                        message, role = {"role": "assistant", "content": "FINAL_PARENT_SYNTHESIS"}, "synthesis"
                 elif root_request:
                     message, role = {"role": "assistant", "content": "INITIAL_PARENT_COMPLETION"}, "initial"
                 else:
@@ -119,6 +149,8 @@ def run_native(args, root, workspace, socket_root):
                 send_model_response(self, request, message, f"fixture-{number}")
                 if role == "child":
                     child_replied.set()
+                if role == "later-child":
+                    later_child_replied.set()
             except Exception as error:
                 model_errors.append(str(error))
                 record("model-errors.jsonl", {"error": str(error)})
@@ -176,7 +208,7 @@ def run_native(args, root, workspace, socket_root):
             "declared_assets": []})
         (root / "prepared.json").write_text(json.dumps(prepared, indent=2))
         proposal = prepared["process"]
-        require(proposal["executable"] == "helpers/qwen_launch_bridge" and proposal["start"] == "attached"
+        require(proposal["executable"] == "adapter/qwen_launch_bridge" and proposal["start"] == "attached"
                 and proposal["working_directory"] == "session_workspace" and proposal["argv"] == argv + ["--acp"],
                 "unexpected native process proposal: " + str(proposal))
         require(prepared["inspection"]["incremental"] and prepared["inspection"]["keep_stdin_open"],
@@ -197,6 +229,7 @@ def run_native(args, root, workspace, socket_root):
         requests = {}
         native_session = None
         synthesis_complete = background_end = close_acknowledged = eof_requested = False
+        background_turn_ids = set()
 
         def send(data):
             for line in data.splitlines():
@@ -246,6 +279,7 @@ def run_native(args, root, workspace, socket_root):
                     break
                 lines.append(following)
             initial_parent = False
+            textless_end = False
             inspected_frames = []
             for line in lines:
                 value = json.loads(line)
@@ -264,6 +298,7 @@ def run_native(args, root, workspace, socket_root):
                     require(params.get("sessionId") == native_session and params.get("source") == "background_notification",
                             "unexpected native background turn")
                     background_admitted.set()
+                    background_turn_ids.add(params["turnId"])
                 if method == "session/update":
                     meta = params.get("update", {}).get("_meta", {})
                     if meta.get("source") == "background_notification_response" and meta.get("backgroundTask", {}).get("turnComplete"):
@@ -271,6 +306,10 @@ def run_native(args, root, workspace, socket_root):
                         synthesis_complete = True
                 if method == "_qwencode/end_turn" and params.get("source") == "background_notification":
                     require(params.get("reason") == "end_turn", "native background turn failed")
+                    if args.textless_intermediate and len(background_turn_ids) == 1:
+                        require(not synthesis_complete and not later_child_replied.is_set(),
+                                "first automatic turn was not textless while its later child remained blocked")
+                        textless_end = True
                     background_end = True
                 if response_to == "qwen/control/session/close" and value.get("result", {}).get("closed") is True:
                     require(value["result"].get("sessionId") == native_session, "native close acknowledged a different session")
@@ -286,6 +325,10 @@ def run_native(args, root, workspace, socket_root):
                 require(not result.get("close_stdin") and "stdin_base64_chunks" not in result,
                         "provider released native ACP at the initial parent end_turn")
                 parent_responded.set()
+            if textless_end:
+                require(not result.get("close_stdin") and "stdin_base64_chunks" not in result,
+                        "provider released native ACP after an intermediate textless turn")
+                textless_turn_finished.set()
             if "stdin_base64_chunks" in result:
                 send(unchunks(result["stdin_base64_chunks"]))
             if result.get("close_stdin"):
@@ -296,6 +339,9 @@ def run_native(args, root, workspace, socket_root):
                 and synthesis_complete and background_end and close_acknowledged and eof_requested,
                 "native background lifecycle did not reach every required boundary")
         require(final_answer == EXPECTED_ANSWER, "provider lost parent synthesis or exposed child/status text: " + str(final_answer))
+        if args.textless_intermediate:
+            require(textless_turn_finished.is_set() and later_child_replied.is_set() and len(background_turn_ids) == 2,
+                    "two native children did not reach textless intermediate and typed final synthesis")
         require(not model_errors, "loopback model failed: " + str(model_errors))
         driver.stdin.close()
         require(driver.wait(timeout=10) == 0, "SDK driver did not shut down its adapter cleanly")
@@ -304,6 +350,7 @@ def run_native(args, root, workspace, socket_root):
             "generation_digest": ready["generation_digest"],
             "package_index_sha256": hashlib.sha256((package / "package.files.json").read_bytes()).hexdigest(),
             "initial_parent_before_child": True, "native_synthesis_complete": synthesis_complete,
+            "textless_intermediate": args.textless_intermediate,
             "conditional_close_acknowledged": close_acknowledged, "eof_requested_after_close": eof_requested,
             "exit_code": process.returncode, "result": final_answer,
             "provider_invocations": invocation_count, "model_requests": len(model_requests)}
@@ -311,6 +358,7 @@ def run_native(args, root, workspace, socket_root):
         print(json.dumps(summary))
     finally:
         parent_responded.set()
+        textless_turn_finished.set()
         if process and process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
             try:
@@ -337,6 +385,8 @@ def run_native(args, root, workspace, socket_root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, help="Keep native evidence beneath this existing directory")
+    parser.add_argument("--textless-intermediate", action="store_true",
+                        help="Complete two children with a textless automatic turn before the final synthesis")
     parser.add_argument("package", type=Path)
     parser.add_argument("driver", type=Path, help="Built qwen_contract_tests with its SDK native ACP driver mode")
     parser.add_argument("native_command", nargs=argparse.REMAINDER)

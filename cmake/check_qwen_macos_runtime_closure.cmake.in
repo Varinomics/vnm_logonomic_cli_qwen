@@ -24,7 +24,7 @@ foreach(entry RANGE 0 ${last})
 endforeach()
 
 foreach(executable IN ITEMS
-        adapter/qwen_adapter helpers/qwen_helper helpers/qwen_launch_bridge)
+        adapter/qwen_adapter adapter/qwen_helper adapter/qwen_launch_bridge)
     file(GET_RUNTIME_DEPENDENCIES EXECUTABLES "${package}/${executable}"
         PRE_EXCLUDE_REGEXES "^/System/Library/" "^/usr/lib/"
         RESOLVED_DEPENDENCIES_VAR resolved UNRESOLVED_DEPENDENCIES_VAR unresolved

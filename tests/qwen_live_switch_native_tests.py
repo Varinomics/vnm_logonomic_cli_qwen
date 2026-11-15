@@ -128,7 +128,7 @@ def run_native(args, root):
     profile, runtime, home, workspace = [root / name for name in ("profile", "runtime", "home", "workspace")]
     for path in (profile, runtime, home, workspace):
         path.mkdir()
-    helper = args.package / "helpers" / "qwen_helper"
+    helper = args.package / "adapter" / "qwen_helper"
     hook_command = shlex.join([sys.executable, str(Path(__file__).resolve()), "--hook", str(root), str(helper)])
     settings = {
         "hooks": {name: [{"hooks": [{"type": "command", "command": hook_command,
@@ -161,7 +161,7 @@ def run_native(args, root):
         "LOGONOMIC_VNMCTL_PATH": str(args.transport), "LOGONOMIC_SESSION_CAPABILITY": "c" * 64,
         "LOGONOMIC_PROVIDER_PACKAGE_ID": "logonomic.cli.qwen",
         "LOGONOMIC_PROVIDER_GENERATION_DIGEST": "d" * 64, "LOGONOMIC_PROVIDER_GENERATION_NONCE": "e" * 32,
-        "LOGONOMIC_PROVIDER_HELPERS_DIR": str(helper.parent),
+        "LOGONOMIC_PROVIDER_HELPERS_DIR": str(args.package / "helpers"),
     })
     native_command = args.native_command + ["--auth-type", "openai", "--model", "fixture-model",
         "--openai-api-key", "native-fixture-key", "--openai-base-url", f"http://127.0.0.1:{server.server_port}/v1"]

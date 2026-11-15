@@ -2,6 +2,7 @@
 #include "qwen_json.h"
 #include "qwen_launcher.h"
 #include "qwen_lifecycle.h"
+#include "qwen_metadata_file_p.h"
 #include "qwen_profile.h"
 
 #include <logonomic_cli_addon/lifecycle_correlation_lifetime.h>
@@ -18,9 +19,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <filesystem>
-#include <fstream>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -120,36 +121,35 @@ struct Metadata
     bool terminal = false;
 };
 
-std::optional<Metadata> read_metadata(
+struct Metadata_read
+{
+    std::optional<Metadata> snapshot;
+    bool retry = false;
+};
+
+Metadata_read read_metadata(
     const fs::path& path, const std::string& session, const std::string& agent)
 {
     std::error_code error;
     const auto size = fs::file_size(native_io_path(path), error);
     if (error == std::errc::no_such_file_or_directory || error == std::errc::not_a_directory) {
-        return std::nullopt;
+        return {};
     }
-    if (error) {
-        throw Observation_failure("subagent_metadata_unavailable");
+    if (error || size > k_metadata_bound) {
+        return {std::nullopt, true};
     }
-    if (size > k_metadata_bound) {
-        throw Observation_failure("subagent_metadata_capacity_exhausted");
-    }
-    std::ifstream input(native_io_path(path), std::ios::binary);
+    auto input = detail::open_metadata_file(native_io_path(path));
     if (!input) {
         // Atomic replacement may remove the path between stat and open.
         if (!fs::exists(native_io_path(path), error) && !error) {
-            return std::nullopt;
+            return {};
         }
-        throw Observation_failure("subagent_metadata_unavailable");
+        return {std::nullopt, true};
     }
     std::string bytes(k_metadata_bound + 1, '\0');
-    input.read(bytes.data(), (std::streamsize)bytes.size());
-    bytes.resize((std::size_t)input.gcount());
-    if (input.bad()) {
-        throw Observation_failure("subagent_metadata_unavailable");
-    }
-    if (bytes.size() > k_metadata_bound) {
-        throw Observation_failure("subagent_metadata_capacity_exhausted");
+    bytes.resize(std::fread(bytes.data(), 1, bytes.size(), input.get()));
+    if (std::ferror(input.get()) || bytes.size() > k_metadata_bound) {
+        return {std::nullopt, true};
     }
     addon::Json_parse_limits limits;
     limits.max_string_bytes = k_metadata_bound;
@@ -157,7 +157,7 @@ std::optional<Metadata> read_metadata(
     if (!value || !value->is_object() || json::text(*value, "parentSessionId") != session ||
         json::text(*value, "agentId") != agent)
     {
-        throw Observation_failure("subagent_metadata_identity_invalid");
+        return {std::nullopt, true};
     }
     const auto* count = value->find("resumeCount");
     if (!count || !count->is_number() || !std::isfinite(count->as_number()) ||
@@ -166,16 +166,16 @@ std::optional<Metadata> read_metadata(
         !json::bounded_string(json::member(*value, "createdAt"), 160) ||
         !json::bounded_string(json::member(*value, "lastUpdatedAt"), 160))
     {
-        throw Observation_failure("subagent_metadata_lifecycle_unavailable");
+        return {std::nullopt, true};
     }
     const auto status = json::text(*value, "status");
     const bool terminal = status == "completed" || status == "failed" ||
                           status == "cancelled" || status == "paused";
     if (status != "running" && !terminal) {
-        throw Observation_failure("subagent_metadata_status_unavailable");
+        return {std::nullopt, true};
     }
-    return Metadata{(std::uint64_t)count->as_number(), json::text(*value, "createdAt"),
-        json::text(*value, "lastUpdatedAt"), terminal};
+    return {Metadata{(std::uint64_t)count->as_number(), json::text(*value, "createdAt"),
+        json::text(*value, "lastUpdatedAt"), terminal}, false};
 }
 
 struct Child
@@ -185,6 +185,7 @@ struct Child
     std::string label;
     fs::path path;
     std::optional<Metadata> initial;
+    bool initial_pending = false;
     std::optional<std::uint64_t> resume_count;
     std::string created_at;
     bool active = true;
@@ -261,8 +262,14 @@ void accept_metadata(Binding& binding, Child& child, const Metadata& metadata)
     if (!child.active) {
         return;
     }
+    if (child.initial_pending) {
+        // A failed read at START leaves the earlier snapshot unknown. The
+        // first recovered terminal record cannot establish a new completion.
+        child.initial         = metadata;
+        child.initial_pending = false;
+    }
     if (!child.created_at.empty() && child.created_at != metadata.created_at) {
-        throw Observation_failure("subagent_metadata_identity_changed");
+        return;
     }
     if (child.resume_count && metadata.resume_count != *child.resume_count) {
         // Qwen persists a resume before firing its START hook. Metadata alone
@@ -285,17 +292,21 @@ void accept_metadata(Binding& binding, Child& child, const Metadata& metadata)
     }
 }
 
-void scan(Binding& binding)
+bool scan(Binding& binding)
 {
+    bool complete = true;
     for (auto& [id, child] : binding.children) {
         (void)id;
         if (!child.active) {
             continue;
         }
-        if (const auto metadata = read_metadata(child.path, binding.session, child.native_id)) {
-            accept_metadata(binding, child, *metadata);
+        const auto metadata = read_metadata(child.path, binding.session, child.native_id);
+        complete &= !metadata.retry;
+        if (metadata.snapshot) {
+            accept_metadata(binding, child, *metadata.snapshot);
         }
     }
+    return complete;
 }
 
 bool directory_exists(const fs::path& path)
@@ -500,7 +511,9 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
     child.run_id = "qwen:" + addon::to_hex(addon::Sha256::digest(binding.nonce + ':' + event_id));
     child.label = json::text(body, "agent_type");
     child.path = binding.directory / ("agent-" + filename_component(agent) + ".meta.json");
-    child.initial = read_metadata(child.path, session, agent);
+    const auto initial    = read_metadata(child.path, session, agent);
+    child.initial         = initial.snapshot;
+    child.initial_pending = initial.retry;
     if (child.initial) {
         child.created_at = child.initial->created_at;
         child.resume_count = child.initial->resume_count;
@@ -734,12 +747,14 @@ void Lifecycle_observer::handle(addon::Invocation_context& context)
                         const bool replaced = update_observation(
                             *binding, *m_state->service, m_state->configuration);
                         if (!replaced) {
-                            scan(*binding);
-                            if (observation_covered(*binding)) {
+                            if (scan(*binding) && observation_covered(*binding)) {
                                 binding->subscription.acknowledge(delivery->batch.capture);
                             }
                             else {
-                                binding->subscription.request_rescan(QStringLiteral("Qwen child coverage incomplete"));
+                                // The shared service paces retries at the subscription's
+                                // interval. One unreadable child cannot poison root hooks
+                                // or prevent other children from publishing their facts.
+                                binding->subscription.request_rescan(QStringLiteral("Qwen child evidence incomplete"));
                             }
                         }
                     }

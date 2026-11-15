@@ -520,6 +520,53 @@ bool settings_contract()
     ok &= check(qwen::updated_config(configured) == configured, "hook installation is idempotent");
     ok &= check(configured.find("/* before */") != std::string::npos &&
         configured.find("/* after */") != std::string::npos, "hook-array comments survive");
+    // A profile configured by the split executable layout is real persisted
+    // input. Only the complete definition that provider installed is owned.
+#ifdef _WIN32
+    const auto* installed_hook_source = R"json({/* Keep the wrapper policy. */"hooks":[{
+        "type":"command","name":"logonomic:qwen:Stop","shell":"powershell","timeout":25.0,
+        /* Keep this explanation of my hook policy. */
+        "command":"if ($env:LOGONOMIC_PROVIDER_HELPERS_DIR) { & (Join-Path $env:LOGONOMIC_PROVIDER_HELPERS_DIR 'qwen_helper.exe') }"
+    }]})json";
+#else
+    const auto* installed_hook_source = R"json({/* Keep the wrapper policy. */"hooks":[{
+        "type":"command","name":"logonomic:qwen:Stop","shell":"bash","timeout":25.0,
+        /* Keep this explanation of my hook policy. */
+        "command":"if [ -n \"$LOGONOMIC_PROVIDER_HELPERS_DIR\" ]; then \"$LOGONOMIC_PROVIDER_HELPERS_DIR/qwen_helper\"; fi"
+    }]})json";
+#endif
+    const auto installed_hook = qwen::parse_settings(installed_hook_source);
+    const auto installed_settings = std::string("{\"custom\":\"keep\",\"hooks\":{\"Stop\":[") +
+        "/* before */{\"hooks\":[{\"name\":\"mine\",\"command\":\"echo done\"}]}," +
+        installed_hook_source + ",/* after */]}}";
+    const auto migrated_settings = qwen::updated_config(installed_settings);
+    const auto migrated = qwen::parse_settings(migrated_settings);
+    const auto& migrated_stop = json_util::member(json_util::member(migrated, "hooks"), "Stop");
+    ok &= check(migrated_stop.as_array().size() == 2 &&
+        addon::serialize_json_canonical(migrated_stop.as_array().back()) ==
+            addon::serialize_json_canonical(qwen::hook_entry("Stop")),
+        "installed provider hook moves beside the adapter");
+    ok &= check(json_util::text(migrated, "custom") == "keep" &&
+        migrated_settings.find("/* before */") != std::string::npos &&
+        migrated_settings.find("/* after */") != std::string::npos,
+        "hook relocation preserves unrelated settings, entries and comments");
+    ok &= check(migrated_settings.find("/* Keep the wrapper policy. */") != std::string::npos &&
+        migrated_settings.find("/* Keep this explanation of my hook policy. */") != std::string::npos,
+        "hook relocation preserves comments inside provider-owned entries");
+    ok &= check(qwen::updated_config(migrated_settings) == migrated_settings,
+        "hook relocation is idempotent");
+    auto modified_installed_hook = installed_hook;
+    modified_installed_hook.set("matcher", qwen::Json("custom"));
+    bool installed_modified_refused = false;
+    try {
+        (void)qwen::updated_config("{\"hooks\":{\"Stop\":[" +
+            addon::serialize_json_canonical(modified_installed_hook) + "]}}");
+    }
+    catch (const std::runtime_error&) {
+        installed_modified_refused = true;
+    }
+    ok &= check(installed_modified_refused,
+        "relocation does not replace a customized installed provider hook");
     auto modified = parsed;
     auto hooks = json_util::member(modified, "hooks");
     auto modified_stop = json_util::member(hooks, "Stop");
