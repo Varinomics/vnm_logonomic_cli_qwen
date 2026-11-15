@@ -24,6 +24,8 @@ import threading
 import time
 import uuid
 
+from qwen_native_test_support import native_environment, send_model_response
+
 if sys.platform == "linux":
     import fcntl
     import pty
@@ -149,40 +151,18 @@ def run_native(args, root):
             require(self.headers.get("Authorization") == "Bearer native-fixture-key", "unexpected model credential")
             append_json(root / "model-requests.jsonl", {"path": self.path, "request": request})
             require(request.get("stream"), "fixture expects a streaming OpenAI request")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            for delta, finish in (({"role": "assistant", "content": "Native fixture response."}, None), ({}, "stop")):
-                response = {"id": "fixture-completion", "object": "chat.completion.chunk", "created": 1,
-                            "model": "fixture-model", "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
-                if finish:
-                    response["usage"] = {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11}
-                self.wfile.write(("data: " + json.dumps(response) + "\n\n").encode())
-                self.wfile.flush()
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
+            send_model_response(self, request, {"role": "assistant", "content": "Native fixture response."})
 
     socket_root = Path(tempfile.mkdtemp(prefix="qwen-run-"))
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Model_handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    environment = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8", "TERM": "xterm-256color",
-        "HOME": str(home), "USERPROFILE": str(home), "TMPDIR": str(root),
-        "XDG_CONFIG_HOME": str(home / "config"), "XDG_DATA_HOME": str(home / "data"),
-        "XDG_CACHE_HOME": str(home / "cache"), "XDG_STATE_HOME": str(home / "state"),
-        "XDG_RUNTIME_DIR": str(socket_root),
-        "QWEN_HOME": str(profile), "QWEN_RUNTIME_DIR": str(runtime),
-        "QWEN_CODE_SYSTEM_SETTINGS_PATH": str(root / "system.json"),
-        "QWEN_CODE_SYSTEM_DEFAULTS_PATH": str(root / "system.json"),
-        "QWEN_LOGONOMIC_PROFILE_HOME": str(profile),
+    environment = native_environment(root, socket_root)
+    environment.update({
         "LOGONOMIC_VNMCTL_PATH": str(args.transport), "LOGONOMIC_SESSION_CAPABILITY": "c" * 64,
         "LOGONOMIC_PROVIDER_PACKAGE_ID": "logonomic.cli.qwen",
         "LOGONOMIC_PROVIDER_GENERATION_DIGEST": "d" * 64, "LOGONOMIC_PROVIDER_GENERATION_NONCE": "e" * 32,
         "LOGONOMIC_PROVIDER_HELPERS_DIR": str(helper.parent),
-        "HTTP_PROXY": "http://127.0.0.1:1", "HTTPS_PROXY": "http://127.0.0.1:1",
-        "ALL_PROXY": "http://127.0.0.1:1", "NO_PROXY": "127.0.0.1,localhost", "CI": "true",
-    }
+    })
     native_command = args.native_command + ["--auth-type", "openai", "--model", "fixture-model",
         "--openai-api-key", "native-fixture-key", "--openai-base-url", f"http://127.0.0.1:{server.server_port}/v1"]
     version = subprocess.run(args.native_command + ["--version"], env=environment, cwd=workspace,

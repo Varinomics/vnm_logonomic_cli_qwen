@@ -40,6 +40,106 @@ bool check(bool condition, const char* message)
     return condition;
 }
 
+bool read_native_driver_request(std::string& line)
+{
+    line.clear();
+    char byte = 0;
+    while (std::cin.get(byte)) {
+        if (byte == '\n') return true;
+        // Include the terminating newline in the SDK's frame byte bound.
+        if (line.size() >= addon::limits::k_max_frame_bytes - 1) {
+            throw std::runtime_error("native ACP driver request exceeds the SDK frame bound");
+        }
+        line.push_back(byte);
+    }
+    if (std::cin.bad()) throw std::runtime_error("native ACP driver input failed");
+    if (!line.empty()) throw std::runtime_error("native ACP driver request is not newline terminated");
+    return false;
+}
+
+void write_native_driver_result(const addon::Json_value& value)
+{
+    std::cout << addon::serialize_json(value) << '\n' << std::flush;
+    if (!std::cout) throw std::runtime_error("native ACP driver output failed");
+}
+
+int native_acp_driver(const std::filesystem::path& package, const std::filesystem::path& transcript)
+{
+    addon::Transcript_recorder recorder;
+    addon::Simulator_options options;
+    options.package_directory = package;
+    addon::Host_simulator host(std::move(options), &recorder);
+    std::cin.tie(nullptr);
+    bool started = false;
+    int result = 1;
+    try {
+        addon::Contract_failure failure;
+        if (!host.start(&failure)) {
+            throw std::runtime_error("native ACP driver start failed: " + failure.reason_code + ": " + failure.detail);
+        }
+        started = true;
+        auto ready = addon::Json_value::object();
+        ready.set("status", addon::Json_value("ready"));
+        ready.set("package_id", addon::Json_value(host.package()->bootstrap.package_id));
+        ready.set("generation_digest", addon::Json_value(host.generation_digest()));
+        ready.set("generation_nonce", addon::Json_value(host.generation_nonce()));
+        write_native_driver_result(ready);
+
+        std::string line;
+        std::size_t invocation_count = 0;
+        while (read_native_driver_request(line)) {
+            if (++invocation_count > 256) {
+                throw std::runtime_error("native ACP driver invocation bound exceeded");
+            }
+            addon::Json_parse_error error;
+            const auto request = addon::parse_json(line, {}, &error);
+            if (!request || !request->is_object() || request->as_object().size() != 2) {
+                throw std::runtime_error("native ACP driver requires an object with only operation and payload");
+            }
+            const auto* operation = request->find("operation");
+            const auto* payload = request->find("payload");
+            if (operation == nullptr || !operation->is_string() ||
+                    (operation->as_string() != "prepare" && operation->as_string() != "inspect") ||
+                    payload == nullptr || !payload->is_object()) {
+                throw std::runtime_error("native ACP driver requires prepare or inspect and an object payload");
+            }
+            const auto id = host.invoke({"structured-session", 3}, operation->as_string(), *payload, 15000);
+            const auto outcome = host.wait_outcome(id, 18000);
+            if (!outcome) throw std::runtime_error("native ACP driver outcome timed out");
+            auto response = addon::Json_value::object();
+            response.set("status", addon::Json_value(addon::host_status_name(outcome->status)));
+            response.set("reason_code", addon::Json_value(outcome->reason_code));
+            response.set("message", addon::Json_value(outcome->message));
+            response.set("payload", outcome->payload);
+            write_native_driver_result(response);
+            if (outcome->status != addon::Host_status::SUCCESS || host.state() != addon::Simulator_state::READY) {
+                throw std::runtime_error("native ACP driver invocation failed: " + outcome->reason_code);
+            }
+        }
+        result = 0;
+    }
+    catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+    }
+
+    if (started) {
+        int exit_code = -1;
+        if (!host.shutdown(3000, &exit_code) || exit_code != 0) {
+            std::cerr << "native ACP driver adapter did not shut down cleanly\n";
+            result = 1;
+        }
+    }
+    std::ofstream output(transcript, std::ios::binary | std::ios::trunc);
+    output << recorder.text();
+    output.close();
+    if (!output) {
+        std::cerr << "native ACP driver transcript could not be written\n";
+        result = 1;
+    }
+    if (result != 0) std::cerr << host.stderr_text();
+    return result;
+}
+
 int helper_transport_fixture(int argc, char** argv)
 {
     const auto capture_path = qwen::environment_value(addon::current_process_environment(), "QWEN_TEST_HELPER_CAPTURE");
@@ -1041,6 +1141,10 @@ bool execution_context_contract(const std::filesystem::path& package, const std:
 
 int main(int argc, char** argv)
 {
+    if (argc > 1 && std::string_view(argv[1]) == "--native-acp-driver") {
+        if (argc != 4) return 2;
+        return native_acp_driver(addon::path_from_utf8(argv[2]), addon::path_from_utf8(argv[3]));
+    }
     if (argc > 1 && (std::string_view(argv[1]) == "provider-event" ||
             std::string_view(argv[1]) == "request-title-instruction"))
     {
