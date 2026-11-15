@@ -217,6 +217,25 @@ an installed `@qwen-code/sdk/peer`, run `node tests/qwen_peer_sdk_tests.mjs
 endpoint without a model API or user session. This proves the native wire and
 receipt boundary, not idle-turn scheduling in the actual Qwen terminal UI.
 
+Set `QWEN_NATIVE_TEST_COMMAND` to a CMake list containing an installed Qwen
+command and its arguments to register the opt-in Linux x86-64 native tests.
+`qwen_acp_native_tests` runs the real provider's `prepare`/`inspect` path through
+a persistent SDK host simulator in `qwen_contract_tests` against that CLI and a
+loopback model. It holds a native background child until the first parent `end_turn`, then verifies the final
+parent synthesis, conditional session close, and EOF after acknowledgment. Its
+disposable profile explicitly selects default approval mode and allows `Agent`;
+this does not change production permission policy or user settings. It needs no
+model account or API spend and does not install Qwen. The supplied package is
+copied intact and validated by the SDK before the native exchange; every adapter
+invocation uses that same negotiated generation. This tests native ACP behavior,
+not shipping package qualification. To retain its protocol,
+model, and SDK evidence, run the fixture directly:
+
+```sh
+python3 -B tests/qwen_acp_native_tests.py --output-dir /existing/evidence-directory \
+  /path/to/provider-package /path/to/qwen_contract_tests -- /path/to/qwen
+```
+
 ## Source provenance
 
 Behavior was traced against the official Qwen Code source at

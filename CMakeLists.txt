@@ -214,7 +214,7 @@ target_link_libraries(qwen_error_boundary_tests PRIVATE qwen_provider logonomic_
 qwen_target(qwen_error_boundary_tests)
 add_test(NAME qwen_error_boundary_tests COMMAND qwen_error_boundary_tests)
 
-set(QWEN_NATIVE_TEST_COMMAND "" CACHE STRING "Installed Qwen command and arguments for opt-in native PTY tests")
+set(QWEN_NATIVE_TEST_COMMAND "" CACHE STRING "Installed Qwen command and arguments for opt-in native acceptance tests")
 if(QWEN_NATIVE_TEST_COMMAND)
     add_dependencies(qwen_contract_tests logonomic_cli_addon_host_simulator)
     add_test(NAME qwen_live_switch_native_tests
@@ -223,4 +223,10 @@ if(QWEN_NATIVE_TEST_COMMAND)
             "$<TARGET_FILE:qwen_contract_tests>" -- ${QWEN_NATIVE_TEST_COMMAND})
     set_tests_properties(qwen_live_switch_native_tests PROPERTIES
         TIMEOUT 180 SKIP_RETURN_CODE 77 LABELS "cli-addon;native-acceptance;live-switch")
+    add_test(NAME qwen_acp_native_tests
+        COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/qwen_acp_native_tests.py"
+            "${QWEN_PACKAGE_DIRECTORY}" "$<TARGET_FILE:qwen_contract_tests>"
+            -- ${QWEN_NATIVE_TEST_COMMAND})
+    set_tests_properties(qwen_acp_native_tests PROPERTIES
+        TIMEOUT 180 SKIP_RETURN_CODE 77 LABELS "cli-addon;native-acceptance;acp")
 endif()
