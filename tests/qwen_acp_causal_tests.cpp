@@ -1,4 +1,5 @@
 #include "qwen_acp.h"
+#include "qwen_acp_test_support.h"
 #include "qwen_json.h"
 #include <logonomic_cli_addon/json_utilities.h>
 #include <logonomic_cli_addon/session_contracts.h>
@@ -10,6 +11,7 @@
 namespace addon = logonomic::cli_addon;
 namespace json_util = logonomic::cli_addon::json;
 namespace provider = qwen;
+namespace wire = qwen::acp_test;
 namespace {
 int assertions=0, failures=0;
 void require(bool ok, const char* message) {
@@ -23,7 +25,7 @@ addon::Structured_inspect_result inspect(std::string state, std::string bytes,
     r.final=final;r.exit_code=exit_code;r.timed_out=timed_out;
     return provider::inspect_acp(r);
 }
-const std::string initialize=R"({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"qwen-code","title":"Qwen Code","version":"fixture"},"authMethods":[],"agentCapabilities":{}}})" "\n";
+const std::string initialize = wire::initialize_response();
 const std::string new_session=R"({"jsonrpc":"2.0","id":2,"result":{"sessionId":"s","models":{"currentModelId":"m","availableModels":[{"modelId":"m","name":"Model","description":null}]},"modes":{},"configOptions":[]}})" "\n";
 const std::string completion=R"({"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}})" "\n";
 const std::string model_text=R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ANSWER"}}}})" "\n";
@@ -38,7 +40,8 @@ void launcher_permissions()
     request.control.task_id = "6a4b79a8-24d9-478c-8ee9-94f93151c2a7";
     request.control.private_artifact_root = "C:/task";
     request.control.servers.push_back({"delegation", "relay", {"submit"}, {}});
-    auto state = *json_util::parse(provider::initial_acp_state(request.prompt, provider::task_server_receipts(request)));
+    const auto initialized = inspect(provider::initial_acp_state(request.prompt, provider::task_server_receipts(request)), initialize);
+    auto state = *json_util::parse(initialized.protocol_state);
     state.set("stage", Json("await_prompt"));
     state.set("session_id", Json("s"));
     state.set("prompt_base64", Json(""));
@@ -57,15 +60,22 @@ void launcher_permissions()
                 {"sessionId", Json(session)}, {"toolCall", std::move(call)}, {"options", std::move(options)}})}})) + '\n';
     };
     const std::string own = "mcp__logonomic-task-6a4b79a8-24d9-478c-8ee9-94f93151c2a_15ssf2z";
-    for (const auto& name : {own, std::string("run_shell_command"), own + "_other",
-            std::string("mcp__user_server__submit")}) {
-        const auto result = inspect(pending, permission(name) + "{");
-        const auto expected = name == own ? "proceed_once" : "cancel";
-        require(!result.failure_reason && result.stdin_bytes &&
-            result.stdin_bytes->find(std::string("\"optionId\":\"") + expected + "\"") != std::string::npos,
-            "permission replies immediately: own Task tool once, everything else rejected once");
-        const auto next = inspect(result.protocol_state, "");
-        require(!next.stdin_bytes, "a permission reply is not replayed across a partial later record");
+    const auto waiting = inspect(pending, model_text + wire::active_work(1, "s", wire::one_hold()) + completion);
+    const auto closing = inspect(pending, model_text + wire::active_work(1, "s") + completion);
+    require(!waiting.failure_reason && !closing.failure_reason && closing.stdin_bytes,
+        "permission fixtures cover parent generation, background work, and outstanding close");
+    for (const auto& phase : {pending, waiting.protocol_state, closing.protocol_state}) {
+        for (const auto& name : {own, std::string("Agent"), std::string("agent"), std::string("run_shell_command"), own + "_other",
+                std::string("mcp__user_server__submit")})
+        {
+            const auto result = inspect(phase, permission(name) + "{");
+            const auto expected = name == own ? "proceed_once" : "cancel";
+            require(!result.failure_reason && result.stdin_bytes &&
+                result.stdin_bytes->find(std::string("\"optionId\":\"") + expected + "\"") != std::string::npos,
+                "permission replies immediately in every live phase: own Task tool once, everything else rejected once");
+            const auto next = inspect(result.protocol_state, "");
+            require(!next.stdin_bytes, "a permission reply is not replayed across a partial later record");
+        }
     }
     require(inspect(pending, permission(own, "foreign")).failure_reason.has_value(),
         "a foreign session cannot obtain an approval");
@@ -91,9 +101,13 @@ void task_model_selection()
     }
     const auto prompt = inspect(setup.protocol_state, acknowledged);
     const auto finished = inspect(prompt.protocol_state, model_text +
-        R"({"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}})" "\n");
-    require(!finished.failure_reason && finished.close_stdin && inspect(finished.protocol_state, "", true).result_bytes == "ANSWER",
-        "configured task retains clean-exit completion");
+        wire::active_work(1, "s") + wire::prompt_response(5));
+    require(!finished.failure_reason && !finished.close_stdin && finished.stdin_bytes &&
+        finished.stdin_bytes->find("qwen/control/session/close") != std::string::npos,
+        "configured task also settles native background work before close");
+    const auto closed = inspect(finished.protocol_state, wire::close_response("s"));
+    require(!closed.failure_reason && closed.close_stdin && inspect(closed.protocol_state, "", true).result_bytes == "ANSWER",
+        "configured task retains acknowledged-close and clean-exit completion");
     require(inspect(setup.protocol_state,
         R"({"jsonrpc":"2.0","id":3,"result":{"configOptions":[{"id":"reasoning_effort","currentValue":"medium"}]}})" "\n").failure_reason ==
         "reasoning_effort_unavailable", "a clamped effort never releases the task");
@@ -149,15 +163,36 @@ int main() {
     require(inspect(prompt.protocol_state,"",true,0,true).failure_reason.has_value(),"timeout cannot complete a task");
     for (std::size_t split=1;split<model_text.size();++split) {
         const auto first=inspect(prompt.protocol_state,model_text.substr(0,split));
-        const auto second=inspect(first.protocol_state,model_text.substr(split)+completion);
+        const auto second=inspect(first.protocol_state,model_text.substr(split)+wire::active_work(1,"s")+completion);
         require(!first.failure_reason&&!second.failure_reason,"ordinary fragmented post-request answer stays valid");
-        require(second.close_stdin&&!second.complete,"Qwen asks for EOF rather than early success");
-        const auto advisory=inspect(second.protocol_state,commands);
+        require(!second.close_stdin&&!second.complete&&second.stdin_bytes,"Qwen asks for conditional close before EOF");
+        const auto closed=inspect(second.protocol_state,wire::close_response("s"));
+        require(closed.close_stdin&&!closed.complete&&!closed.failure_reason,"acknowledged native close requests EOF exactly once");
+        const auto advisory=inspect(closed.protocol_state,commands);
         require(!advisory.complete&&!advisory.close_stdin&&!advisory.stdin_bytes&&!advisory.failure_reason,"Qwen drain remains live without repeating EOF");
         const auto settled=inspect(advisory.protocol_state,"",true);
         require(settled.complete&&!settled.failure_reason&&settled.result_bytes=="ANSWER","Qwen requires clean final native exit");
-        require(inspect(second.protocol_state,"",true,7).failure_reason.has_value(),"failed exit overrides retained result");
-        require(inspect(second.protocol_state,model_text).failure_reason.has_value(),"late model output is not a drain advisory");
+        require(inspect(closed.protocol_state,"",true,7).failure_reason.has_value(),"failed exit overrides retained result");
+        require(inspect(closed.protocol_state,model_text).failure_reason.has_value(),"late model output is not a drain advisory");
+    }
+    const auto close_reply = wire::close_response("s");
+    const auto finished_bytes = model_text + wire::active_work(1, "s") + completion;
+    const auto closing = inspect(prompt.protocol_state, finished_bytes);
+    require(closing.stdin_bytes && !closing.failure_reason, "close causality fixture issues one real close request");
+    for (std::size_t split = 1; split < close_reply.size(); ++split) {
+        const auto premature = inspect(prompt.protocol_state, finished_bytes + close_reply.substr(0, split));
+        require(!premature.failure_reason && !premature.stdin_bytes && !premature.close_stdin,
+            "an unclassified pre-request close prefix prevents releasing the close request");
+        require(inspect(premature.protocol_state, close_reply.substr(split)).failure_reason == "out_of_order_acp_response",
+            "every premature close suffix retains its pre-request provenance");
+        const auto prefix = inspect(closing.protocol_state, close_reply.substr(0, split));
+        require(!prefix.failure_reason && !prefix.close_stdin && !prefix.stdin_bytes,
+            "a partial acknowledgment never requests EOF");
+        const auto suffix = inspect(prefix.protocol_state, close_reply.substr(split));
+        require(!suffix.failure_reason && suffix.close_stdin && !suffix.complete,
+            "every valid split acknowledges the issued close exactly once");
+        require(inspect(suffix.protocol_state, "", true).result_bytes == "ANSWER",
+            "fragmented close preserves the complete authenticated answer");
     }
     std::cout<<"qwen_causal_assertions="<<assertions<<" failures="<<failures<<'\n';
     return failures ? 1 : 0;

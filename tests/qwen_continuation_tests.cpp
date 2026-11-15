@@ -1,4 +1,5 @@
 #include "qwen_acp.h"
+#include "qwen_acp_test_support.h"
 
 #include <logonomic_cli_addon/json.h>
 #include <logonomic_cli_addon/session_contracts.h>
@@ -15,6 +16,7 @@
 namespace {
 
 namespace addon = logonomic::cli_addon;
+namespace wire = qwen::acp_test;
 
 void require(bool condition, std::string_view message)
 {
@@ -36,8 +38,7 @@ addon::Structured_inspect_result inspect(std::string state, std::string bytes, b
 
 std::string prompt_state()
 {
-    const auto initialized = inspect(qwen::initial_acp_state("Task"),
-        R"({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"qwen-code","title":"Qwen Code","version":"fixture"},"authMethods":[],"agentCapabilities":{}}})" "\n");
+    const auto initialized = inspect(qwen::initial_acp_state("Task"), wire::initialize_response());
     require(!initialized.failure_reason, "initialize must accept the supported native response");
     const auto prompt = inspect(initialized.protocol_state,
         R"({"jsonrpc":"2.0","id":2,"result":{"sessionId":"s","models":{"currentModelId":"m","availableModels":[{"modelId":"m","name":"Model","description":null}]},"modes":{},"configOptions":[]}})" "\n");
@@ -54,14 +55,17 @@ std::string chunk(std::string_view text)
 
 void finish(std::string state, std::string_view answer)
 {
-    const auto closing = inspect(std::move(state),
-        R"({"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}})" "\n");
-    require(!closing.complete && !closing.failure_reason && closing.close_stdin,
-        "prompt completion must request a clean process exit");
-    const auto settled = inspect(closing.protocol_state, "", true);
+    const auto closing = inspect(std::move(state), wire::active_work(1, "s") + wire::prompt_response());
+    require(!closing.complete && !closing.failure_reason && !closing.close_stdin && closing.stdin_bytes &&
+        closing.stdin_bytes->find("qwen/control/session/close") != std::string::npos,
+        "prompt completion and native quiescence must request a conditional close");
+    const auto closed = inspect(closing.protocol_state, wire::close_response("s"));
+    require(!closed.complete && !closed.failure_reason && closed.close_stdin,
+        "only acknowledged native close requests a clean process exit");
+    const auto settled = inspect(closed.protocol_state, "", true);
     require(settled.complete && !settled.failure_reason && settled.result_bytes == answer,
         "native completion and clean exit must return the entire answer");
-    require(inspect(closing.protocol_state, "", true, 7).failure_reason.has_value(),
+    require(inspect(closed.protocol_state, "", true, 7).failure_reason.has_value(),
         "a retained answer must not override an unsuccessful process exit");
 }
 

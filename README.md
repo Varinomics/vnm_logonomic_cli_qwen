@@ -15,10 +15,15 @@ once per request, and rejects every other permission request once. It never
 selects persistent approval or an approval that switches modes. A launcher
 that needs file edits or commands must grant them itself. These operations
 require `structured-session@3` and, for delegation,
-`delegated-session@3`. An authenticated prompt response requests native stdin
-EOF; validated advisory output is drained through clean process exit before the
-result is released. Timeout, failed exit and incomplete final records fail the
-operation.
+`delegated-session@3`. ACP negotiates Qwen's complete active-work heartbeat,
+including parent-turn accounting, before sending the prompt. A root `end_turn`
+keeps native stdin open while background children and the parent turns consuming
+their results remain active. Only fresh, ordered root accounting permits a
+native `qwen/control/session/close` request with `onlyIfUnheld` and `requireFlush`;
+the native close acknowledgment establishes the final ownership boundary.
+Validated root output is drained through clean process exit before the result is
+released. Child output remains internal to the native delegation. Missing work
+accounting, timeout, failed exit and incomplete final records fail the operation.
 
 `delegated-model-selection@1` replaces saved `--model`/`-m` options only for an
 explicit task model. Native reasoning effort is applied per session through ACP

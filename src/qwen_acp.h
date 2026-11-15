@@ -2,6 +2,7 @@
 
 #include <logonomic_cli_addon/session_contracts.h>
 
+#include <chrono>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,6 +27,7 @@ std::string initial_acp_input(const logonomic::cli_addon::Delegated_prepare_requ
 std::string initial_acp_state(std::string_view prompt, const std::vector<Task_server_receipt>& receipts = {},
     const logonomic::cli_addon::Delegated_model_selection* selection = nullptr);
 logonomic::cli_addon::Structured_inspect_result inspect_acp(
-    const logonomic::cli_addon::Structured_inspection& inspection);
+    const logonomic::cli_addon::Structured_inspection& inspection,
+    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
 
 } // namespace qwen

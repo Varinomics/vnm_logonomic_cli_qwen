@@ -1,9 +1,12 @@
 #include "qwen_acp.h"
+#include "qwen_acp_test_support.h"
 #include "qwen_json.h"
 
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/package_source.h>
 
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -11,12 +14,15 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace json_util = logonomic::cli_addon::json;
 
 namespace {
 
 namespace addon = logonomic::cli_addon;
+namespace wire = qwen::acp_test;
+using qwen::Json;
 
 void require(bool condition, const char* message)
 {
@@ -34,9 +40,7 @@ qwen::Json parse(std::string_view bytes)
 
 std::string initialize_response()
 {
-    // packages/cli/src/acp-integration/acpAgent.ts at upstream 6a211b4:
-    // initialize identifies qwen-code and advertises these two terminal auth methods.
-    return R"({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"qwen-code","title":"Qwen Code","version":"0.0-test"},"authMethods":[{"id":"openai","name":"Use OpenAI API key","description":"Requires OPENAI_API_KEY","_meta":{"type":"terminal","args":["--auth-type=openai"]}},{"id":"openai-responses","name":"Use OpenAI Responses API key","description":"Requires OPENAI_API_KEY","_meta":{"type":"terminal","args":["--auth-type=openai-responses"]}}],"agentCapabilities":{}}})" "\n";
+    return wire::initialize_response();
 }
 
 std::string new_session_response(std::string_view session = "session-alpha")
@@ -46,7 +50,8 @@ std::string new_session_response(std::string_view session = "session-alpha")
 }
 
 addon::Structured_inspect_result inspect(
-    std::string state, std::string stdout_bytes, bool final = false, int exit_code = 0, bool timed_out = false)
+    std::string state, std::string stdout_bytes, bool final = false, int exit_code = 0, bool timed_out = false,
+    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now())
 {
     addon::Structured_inspection request;
     request.protocol_state = std::move(state);
@@ -54,18 +59,54 @@ addon::Structured_inspect_result inspect(
     request.final           = final;
     request.exit_code       = exit_code;
     request.timed_out       = timed_out;
-    return qwen::inspect_acp(request);
+    return qwen::inspect_acp(request, now);
 }
 
-std::string prompt_state()
+std::chrono::steady_clock::time_point at(std::int64_t milliseconds)
 {
-    auto response = inspect(qwen::initial_acp_state("Implement the bounded change."), initialize_response());
+    return std::chrono::steady_clock::time_point(std::chrono::milliseconds(milliseconds));
+}
+
+std::string prompt_state(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now())
+{
+    auto response = inspect(qwen::initial_acp_state("Implement the bounded change."), initialize_response(), false, 0, false, now);
     require(!response.complete && !response.stdin_bytes, "initialize waits for the already-issued session request");
-    response = inspect(response.protocol_state, new_session_response());
+    response = inspect(response.protocol_state, new_session_response(), false, 0, false, now);
     require(!response.complete && response.stdin_bytes &&
         response.stdin_bytes->find("session/prompt") != std::string::npos,
         "authenticated session releases the prompt under launcher permissions");
     return response.protocol_state;
+}
+
+void require_waiting(const addon::Structured_inspect_result& result, const char* message)
+{
+    require(!result.complete && !result.close_stdin && !result.failure_reason && !result.stdin_bytes, message);
+}
+
+void require_close(const addon::Structured_inspect_result& result, std::int64_t id = 6)
+{
+    require(!result.complete && !result.close_stdin && !result.failure_reason && result.stdin_bytes,
+        "quiescence requests conditional close without sending EOF");
+    const auto request = parse(*result.stdin_bytes);
+    require(json_util::text(request, "method") == "qwen/control/session/close" &&
+        json_util::member(request, "id").as_integer() == id &&
+        json_util::member(request, "params") == json_util::object({
+            {"sessionId", Json("session-alpha")}, {"onlyIfUnheld", Json(true)},
+            {"requireFlush", Json(true)}, {"drainTimeoutMs", Json(8000)}}),
+        "close requires native atomic no-holds validation and a bounded history flush");
+}
+
+void parent_end_turn_preserves_background_work()
+{
+    // Native Qwen returns the parent prompt while a background Agent can
+    // still run; disposing its ACP Session aborts that work and its result turn.
+    const auto result = inspect(prompt_state(),
+        R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-alpha","update":{"sessionUpdate":"tool_call","toolCallId":"review-agent","title":"Review change","kind":"other","status":"in_progress","rawInput":{"description":"Review the change","run_in_background":true},"_meta":{"toolName":"Agent"}}}})" "\n"
+        R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-alpha","update":{"sessionUpdate":"tool_call_update","toolCallId":"review-agent","status":"completed"}}})" "\n"
+        R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-alpha","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"The review is running."}}}})" "\n"
+        R"({"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}})" "\n");
+    require(!result.complete && !result.close_stdin && !result.failure_reason,
+        "a parent end_turn must keep native ACP open for background completion and synthesis");
 }
 
 void control_servers_are_session_scoped()
@@ -181,10 +222,14 @@ void authenticated_transcript_completes()
         R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-alpha","update":{"sessionUpdate":"usage_update","used":25,"size":131072}}})" "\n"
         R"({"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}})" "\n"
         R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-alpha","update":{"sessionUpdate":"session_info_update","title":"Completed task"}}})" "\n"
-        R"({"jsonrpc":"2.0","method":"qwen/notify/session/title-update","params":{"v":1,"sessionId":"session-alpha","title":"Completed task","titleSource":"auto"}})" "\n"
+        R"({"jsonrpc":"2.0","method":"qwen/notify/session/title-update","params":{"v":1,"sessionId":"session-alpha","title":"Completed task","titleSource":"auto"}})" "\n");
+    require_waiting(response, "prompt completion alone does not settle background work");
+    response = inspect(response.protocol_state, wire::active_work(1));
+    require_close(response);
+    response = inspect(response.protocol_state, wire::close_response() +
         R"({"jsonrpc":"2.0","method":"qwen/notify/session/title-update")");
     require(!response.complete && response.close_stdin && !response.result_bytes && !response.failure_reason,
-        "authenticated prompt completion requests EOF and retains the partial advisory");
+        "confirmed session close requests EOF and retains the partial advisory");
     response = inspect(response.protocol_state,
         R"(,"params":{"v":1,"sessionId":"session-alpha","title":"Completed task","titleSource":"auto"}})" "\n");
     require(!response.complete && !response.close_stdin && !response.failure_reason,
@@ -204,21 +249,29 @@ void completion_is_independent_of_stdout_chunks()
     const std::string advisory =
         R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-alpha","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"help","description":"Show commands","input":null}]}}})" "\n";
     const auto state = prompt_state();
+    const auto closing = inspect(state, completion + wire::active_work(1));
+    require_close(closing);
     for (std::size_t split = 0; split <= advisory.size(); ++split) {
-        auto response = inspect(state, completion + advisory.substr(0, split));
+        auto response = inspect(closing.protocol_state, wire::close_response() + advisory.substr(0, split));
         require(!response.complete && response.close_stdin && !response.failure_reason,
             "any advisory prefix keeps completion pending until EOF");
         response = inspect(response.protocol_state, advisory.substr(split), true);
         require(response.complete && response.result_bytes == "Done." && !response.failure_reason,
             "all advisory split points produce the same result at clean EOF");
     }
-    auto response = inspect(state, completion + advisory, true);
+    auto response = inspect(closing.protocol_state, wire::close_response() + advisory, true);
     require(response.complete && response.result_bytes == "Done." && !response.close_stdin,
-        "prompt and advisory first seen at final EOF complete without another close request");
+        "confirmed close and advisory first seen at final EOF complete without another EOF request");
+    response = inspect(state, completion + wire::active_work(1) + advisory, true);
+    require(response.failure_reason == "acp_incomplete",
+        "clean process exit without an acknowledged conditional close cannot become success");
     // Qwen Code 0.24.3 reply, observed through the scripted delegation gate.
     response = inspect(state,
         R"({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-alpha","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Done."}}}})" "\n"
-        R"({"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn","_meta":{"qwen.branchPoint":{"assistantRecordUuid":"2291684c-370f-4e82-887d-35736fde30b6","checkpointUuid":"8f40be75-ec51-407d-932c-173a155bc9c7"}}}})" "\n", true);
+        R"({"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn","_meta":{"qwen.branchPoint":{"assistantRecordUuid":"2291684c-370f-4e82-887d-35736fde30b6","checkpointUuid":"8f40be75-ec51-407d-932c-173a155bc9c7"}}}})" "\n" +
+        wire::active_work(1));
+    require_close(response);
+    response = inspect(response.protocol_state, wire::close_response(), true);
     require(response.complete && response.result_bytes == "Done." && !response.failure_reason,
         "a prompt reply carrying Qwen's checkpoint metadata completes");
     response = inspect(state,
@@ -226,7 +279,7 @@ void completion_is_independent_of_stdout_chunks()
         R"({"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn","_meta":"branch"}})" "\n", true);
     require(response.failure_reason == "invalid_acp_completion", "reply metadata must be an object");
 
-    const auto draining = inspect(state, completion).protocol_state;
+    const auto draining = inspect(closing.protocol_state, wire::close_response()).protocol_state;
     response = inspect(draining, advisory.substr(0, advisory.size() - 1), true);
     require(response.failure_reason == "acp_incomplete", "an incomplete final advisory is not discarded");
     response = inspect(draining, {}, true, 7);
@@ -262,10 +315,278 @@ void completion_is_independent_of_stdout_chunks()
 
 void authentication_catalog_is_advisory()
 {
-    const auto response = inspect(qwen::initial_acp_state("Implement it."),
-        R"({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"qwen-code","title":"Qwen Code","version":"future-test"},"authMethods":[{"id":"future-provider","name":"Future provider","description":"Authenticate with the configured future provider"}],"agentCapabilities":{}}})" "\n");
+    auto initialize = parse(initialize_response());
+    auto& result = *initialize.find("result");
+    result.find("agentInfo")->set("version", Json("future-test"));
+    result.set("authMethods", parse(
+        R"([{"id":"future-provider","name":"Future provider","description":"Authenticate with the configured future provider"}])"));
+    const auto response = inspect(qwen::initial_acp_state("Implement it."), wire::record(std::move(initialize)));
     require(!response.complete && !response.stdin_bytes && !response.failure_reason,
         "an unused future auth-method catalog does not reject native session authentication");
+}
+
+void work_accounting_requires_complete_negotiated_coverage()
+{
+    addon::Structured_prepare_request request;
+    request.context.working_directory = "/work/repository";
+    const auto input = qwen::initial_acp_input(request);
+    const auto initialize = parse(std::string_view(input).substr(0, input.find('\n')));
+    require(json_util::member(json_util::member(json_util::member(initialize, "params"), "_meta"),
+        "qwen.daemon.activeWorkHeartbeat") == wire::active_work_capability(),
+        "initialize requests all six native hold categories at the supported minimum cadence");
+
+    auto missing = parse(initialize_response());
+    missing.find("result")->erase("_meta");
+    require(inspect(qwen::initial_acp_state("Task"), wire::record(missing)).failure_reason == "acp_active_work_unavailable",
+        "an unnegotiated native server cannot silently retain first-end_turn completion");
+    std::vector<Json> invalid;
+    auto capability = wire::active_work_capability();
+    capability.erase("categories");
+    invalid.push_back(capability);
+    capability = wire::active_work_capability();
+    capability.set("categories", parse(R"(["agent","notification"])"));
+    invalid.push_back(capability);
+    capability = wire::active_work_capability();
+    capability.find("categories")->push_back(Json("agent"));
+    invalid.push_back(capability);
+    for (const auto& interval : {Json(0), Json(4999), Json(60001), Json(5000.5), Json("5000")}) {
+        capability = wire::active_work_capability();
+        capability.set("intervalMs", interval);
+        invalid.push_back(capability);
+    }
+    capability = wire::active_work_capability();
+    capability.set("v", Json(2));
+    invalid.push_back(capability);
+    for (const auto& rejected : invalid) {
+        require(inspect(qwen::initial_acp_state("Task"), wire::initialize_response(rejected)).failure_reason ==
+            "acp_active_work_unavailable", "incomplete or malformed native coverage fails before releasing the task");
+    }
+
+    capability = wire::active_work_capability();
+    capability.find("categories")->push_back(Json("future-work"));
+    capability.set("futureCapability", Json(true));
+    capability.set("intervalMs", Json(60000));
+    const auto accepted = inspect(qwen::initial_acp_state("Task"),
+        wire::active_work_snapshot(1, Json::array()) + wire::initialize_response(capability) + new_session_response());
+    require(!accepted.failure_reason && accepted.stdin_bytes && accepted.stdin_bytes->find("session/prompt") != std::string::npos,
+        "startup snapshots may precede initialize and additive coverage remains compatible");
+    require_waiting(inspect(accepted.protocol_state, wire::message("Done.") + wire::prompt_response()),
+        "the startup channel snapshot does not prove the new session is idle");
+}
+
+void only_fresh_ordered_root_snapshots_allow_close()
+{
+    const auto initial = prompt_state(at(100000));
+    const auto recorded = inspect(initial, wire::message("Done.") + wire::active_work(10), false, 0, false, at(100000));
+    require_waiting(recorded, "idle observations cannot close an unfinished parent prompt");
+    require_close(inspect(recorded.protocol_state, wire::prompt_response(), false, 0, false, at(114999)));
+    auto expired = inspect(recorded.protocol_state, wire::prompt_response(), false, 0, false, at(115000));
+    require_waiting(expired, "the observation expires exactly after three negotiated intervals");
+    expired = inspect(expired.protocol_state, wire::active_work(10), false, 0, false, at(115000));
+    require_waiting(expired, "a duplicate snapshot does not renew freshness");
+    expired = inspect(expired.protocol_state, wire::active_work(9), false, 0, false, at(115001));
+    require_waiting(expired, "a reordered snapshot does not renew freshness");
+    require_close(inspect(expired.protocol_state, wire::active_work(100), false, 0, false, at(115002)));
+    require_waiting(inspect(recorded.protocol_state, wire::prompt_response(), false, 0, false, at(99999)),
+        "a clock preceding the observation cannot prove freshness");
+    const auto negative = inspect(prompt_state(at(-100000)), wire::message("Done.") + wire::active_work(1),
+        false, 0, false, at(-100000));
+    require_close(inspect(negative.protocol_state, wire::prompt_response(), false, 0, false, at(-85001)));
+
+    const auto held = inspect(initial,
+        wire::message("Done.") + wire::active_work(20, "session-alpha", wire::one_hold()) + wire::prompt_response(),
+        false, 0, false, at(100000));
+    require_waiting(held, "a running child holds the session after the parent response");
+    for (const auto sequence : {19, 20}) {
+        require_waiting(inspect(held.protocol_state, wire::active_work(sequence), false, 0, false, at(100001)),
+            "an old empty report cannot erase a newer child hold");
+    }
+    for (const auto* category : {"agent", "notification", "shell", "session", "workflow", "tool", "future-work"}) {
+        auto report = parse(wire::active_work(21, "session-alpha", wire::one_hold(category)));
+        report.find("params")->find("sessions")->as_array().front().set("hasRunningBackgroundTasks", Json(false));
+        require_waiting(inspect(held.protocol_state, wire::record(report), false, 0, false, at(100001)),
+            "every hold category prevents close even when the background-running hint is false");
+    }
+    require_waiting(inspect(held.protocol_state, wire::active_work_snapshot(21, Json::array()), false, 0, false, at(100001)),
+        "root absence cannot stand in for an acknowledged conditional close");
+    require_waiting(inspect(held.protocol_state, wire::active_work(21, "other-session"), false, 0, false, at(100001)),
+        "a foreign session's empty report cannot settle the owned session");
+    auto sessions = Json::array();
+    sessions.push_back(wire::active_work_session("other-session", wire::one_hold()));
+    sessions.push_back(wire::active_work_session("session-alpha"));
+    require_close(inspect(held.protocol_state, wire::active_work_snapshot(21, sessions), false, 0, false, at(100001)));
+    sessions.push_back(wire::active_work_session("session-alpha"));
+    require(inspect(held.protocol_state, wire::active_work_snapshot(21, sessions)).failure_reason == "invalid_acp_active_work",
+        "a contradictory duplicate session makes the full snapshot invalid");
+
+    for (const auto& sequence : {Json(-1), Json(0), Json(1.5), Json("21")}) {
+        auto report = parse(wire::active_work(21));
+        report.find("params")->set("seq", sequence);
+        require(inspect(held.protocol_state, wire::record(report)).failure_reason == "invalid_acp_active_work",
+            "snapshot sequence identity must be a positive safe integer");
+    }
+    auto malformed = parse(wire::active_work(21));
+    malformed.find("params")->find("sessions")->as_array().front().set("holds", Json::object());
+    require(inspect(held.protocol_state, wire::record(malformed)).failure_reason == "invalid_acp_active_work",
+        "unreadable holds cannot be mistaken for no work");
+}
+
+std::string background_start(std::string_view session = "session-alpha", std::string_view turn = "background-1")
+{
+    return wire::record(json_util::object({{"jsonrpc", Json("2.0")}, {"id", Json("admit-background")},
+        {"method", Json("_qwencode/start_turn")}, {"params", json_util::object({
+            {"sessionId", Json(std::string(session))}, {"source", Json("background_notification")},
+            {"turnId", Json(std::string(turn))}, {"taskId", Json("child-1")}, {"kind", Json("agent")},
+            {"startedAt", Json(std::int64_t{1730000000000})}, {"afterPromptId", Json("root-prompt")}})}}));
+}
+
+std::string background_response(std::string_view text, bool complete, bool partial = false,
+    std::string_view turn = "background-1")
+{
+    return wire::message(text, json_util::object({{"source", Json("background_notification_response")},
+        {"qwenDiscreteMessage", Json(true)}, {"backgroundTask", json_util::object({
+            {"taskId", Json("child-1")}, {"kind", Json("agent")}, {"status", Json("completed")},
+            {"turnId", Json(std::string(turn))}, {"turnComplete", Json(complete)}, {"partial", Json(partial)}})}}));
+}
+
+std::string background_end(std::string_view reason = "end_turn")
+{
+    return wire::record(json_util::object({{"jsonrpc", Json("2.0")}, {"method", Json("_qwencode/end_turn")},
+        {"params", json_util::object({{"sessionId", Json("session-alpha")}, {"source", Json("background_notification")},
+            {"turnId", Json("background-1")}, {"reason", Json(std::string(reason))}})}}));
+}
+
+void delayed_children_require_parent_synthesis()
+{
+    for (const bool preliminary_text : {false, true}) {
+        auto result = inspect(prompt_state(),
+            wire::message("Child stream is not the task answer.", json_util::object({
+                {"parentToolCallId", Json("call-agent")}, {"subagentType", Json("reviewer")},
+                {"agent", json_util::object({{"agentName", Json("/root/reviewer")}, {"depth", Json(1)}, {"kind", Json("subagent")}})}})) +
+            (preliminary_text ? wire::message("Working. ") : "") +
+            wire::active_work(1, "session-alpha", wire::one_hold()) + wire::prompt_response());
+        require_waiting(result, "an empty first response is allowed while native children are running");
+        // Captured from released 0.27.4: completion display precedes the
+        // queued notification and has its own non-model source tag.
+        result = inspect(result.protocol_state, wire::message("Background agent completed.",
+            json_util::object({{"source", Json("background_task_completed")}, {"qwenDiscreteMessage", Json(true)},
+                {"backgroundTask", json_util::object({{"taskId", Json("child-1")}, {"status", Json("completed")},
+                    {"kind", Json("agent")}})}})));
+        require_waiting(result, "native completion display is not parent synthesis or proof of quiescence");
+        result = inspect(result.protocol_state, background_start());
+        require(!result.complete && !result.close_stdin && !result.failure_reason && result.stdin_bytes &&
+            json_util::member(json_util::member(parse(*result.stdin_bytes), "error"), "code").as_integer() == -32601,
+            "native automatic-turn admission receives its documented no-host-policy response");
+        result = inspect(result.protocol_state,
+            wire::message("Raw task-result display.", json_util::object({{"source", Json("background_notification")}})) +
+            background_response("Verified the result.", false) + wire::active_work(2));
+        require_waiting(result, "even an empty heartbeat cannot erase an admitted unfinished parent turn");
+        result = inspect(result.protocol_state,
+            background_response("", true) + background_end() + wire::active_work(3));
+        require_close(result);
+        result = inspect(result.protocol_state, wire::close_response() + wire::active_work_snapshot(4, Json::array()));
+        require(!result.failure_reason && result.close_stdin && !result.complete,
+            "a native close acknowledgment is the first point that permits EOF");
+        result = inspect(result.protocol_state, {}, true);
+        require(result.complete && !result.failure_reason &&
+            result.result_bytes == (preliminary_text ? "Working. Verified the result." : "Verified the result."),
+            "only the parent's model text and completed synthesis become the task result");
+    }
+
+    auto pending = inspect(prompt_state(), wire::message("Preliminary answer.") +
+        wire::active_work(1, "session-alpha", wire::one_hold()) + wire::prompt_response());
+    pending = inspect(pending.protocol_state, background_start());
+    require(!pending.failure_reason, "background failure fixtures begin with an admitted turn");
+    require(inspect(pending.protocol_state, background_response("Partial answer.", true, true)).failure_reason ==
+        "acp_background_incomplete", "native partial synthesis cannot produce a successful task");
+    require(inspect(pending.protocol_state, background_end("cancelled")).failure_reason == "acp_cancelled",
+        "background cancellation cannot be hidden by the preliminary answer");
+    require(inspect(pending.protocol_state, background_response("", true) + background_end("max_tokens")).failure_reason ==
+        "acp_background_incomplete", "a nonterminal synthesis stop cannot produce success");
+    require(inspect(pending.protocol_state, wire::message("[notification error] model unavailable") + background_end() +
+        wire::active_work(2)).failure_reason == "acp_background_incomplete",
+        "native failure before the first synthesis segment lacks typed completion and cannot succeed");
+    require(inspect(pending.protocol_state, background_response("Wrong turn.", true, false, "foreign-turn")).failure_reason ==
+        "invalid_acp_background_turn", "synthesis completion belongs to the admitted native turn");
+    require(inspect(pending.protocol_state, background_start()).failure_reason == "unsupported_acp_reverse_request",
+        "a second admission cannot replace an unfinished native turn");
+    require(inspect(prompt_state(), background_start("other-session")).failure_reason == "unsupported_acp_reverse_request",
+        "automatic-turn admission is confined to the owned session");
+}
+
+void conditional_close_handles_races_and_invalid_responses()
+{
+    const auto initial = prompt_state();
+    const auto closing = inspect(initial, wire::message("Done.") + wire::active_work(1) + wire::prompt_response());
+    require_close(closing);
+    auto refused = inspect(closing.protocol_state,
+        wire::close_response("session-alpha", 6, false, wire::one_hold("notification", "parent-synthesis")));
+    require_waiting(refused, "work starting after the empty snapshot makes native close defer");
+    refused = inspect(refused.protocol_state, wire::active_work(1));
+    require_waiting(refused, "close refusal invalidates every already-observed snapshot");
+    const auto retried = inspect(refused.protocol_state, wire::active_work(2));
+    require_close(retried, 7);
+    require(inspect(retried.protocol_state, wire::close_response()).failure_reason == "invalid_acp_close",
+        "a late reply to an earlier close cannot acknowledge a later close");
+    const auto settled = inspect(retried.protocol_state, wire::close_response("session-alpha", 7), true);
+    require(settled.result_bytes == "Done." && !settled.failure_reason, "a fresh retry may settle the same native session");
+    require(inspect(closing.protocol_state, wire::close_response("foreign")).failure_reason == "invalid_acp_close",
+        "close acknowledgments authenticate the native session");
+    require(inspect(closing.protocol_state, wire::close_response("session-alpha", 6, false)).failure_reason == "invalid_acp_close",
+        "a refusal without its native hold evidence is malformed");
+    require(inspect(closing.protocol_state,
+        R"({"jsonrpc":"2.0","id":6,"error":{"code":-32601,"message":"Method not found"}})" "\n").failure_reason ==
+        "acp_request_failed", "unsupported conditional close fails instead of falling back to EOF");
+    const auto admission_race = inspect(closing.protocol_state, background_start());
+    require(!admission_race.failure_reason && admission_race.stdin_bytes && !admission_race.close_stdin,
+        "native background admission stays live while conditional close is outstanding");
+    require(inspect(admission_race.protocol_state, wire::close_response()).failure_reason == "invalid_acp_close",
+        "an admitted unfinished parent turn contradicts a successful close acknowledgment");
+
+    const auto partial = inspect(initial, wire::message("Done.") + wire::active_work(1) + wire::prompt_response() +
+        R"({"jsonrpc":"2.0","method":"qwen/notify/channel/active-work")");
+    require_waiting(partial, "an unclassified trailing record holds the conditional close request");
+    const auto held_tail = inspect(partial.protocol_state,
+        R"(,"params":{"v":1,"seq":2,"sessions":[{"sessionId":"session-alpha","holds":[{"category":"agent","id":"new-child"}]}]}})" "\n");
+    require_waiting(held_tail, "a fragmented newer child snapshot wins before any close is sent");
+    require(inspect(initial, wire::message("Done.") + wire::active_work(1) + wire::prompt_response() +
+        wire::close_response()).failure_reason == "out_of_order_acp_response",
+        "a close response produced before its request cannot authenticate completion");
+}
+
+void native_prompt_metadata_is_advisory()
+{
+    // Released 0.27.4 emits this asynchronously when its recording service
+    // saves a user prompt; it is metadata, not another prompt or model text.
+    const auto initial = prompt_state();
+    const auto waiting = inspect(initial, wire::message("Done.") + wire::prompt_response());
+    const auto closing = inspect(waiting.protocol_state, wire::active_work(1));
+    require_close(closing);
+    const auto draining = inspect(closing.protocol_state, wire::close_response());
+    auto notification = parse(
+        R"({"jsonrpc":"2.0","method":"qwen/notify/session/last-user-prompt","params":{"v":1,"sessionId":"session-alpha","timestamp":"2026-11-15T12:30:25.027Z"}})");
+    for (const auto& phase : {initial, waiting.protocol_state, closing.protocol_state, draining.protocol_state}) {
+        require_waiting(inspect(phase, wire::record(notification)),
+            "native last-prompt metadata is accepted in every live and drain phase");
+        auto empty = notification;
+        empty.find("params")->set("timestamp", Json());
+        require_waiting(inspect(phase, wire::record(empty)), "native absent timestamp remains a typed advisory");
+        auto malformed = notification;
+        malformed.find("params")->set("timestamp", Json(true));
+        require(inspect(phase, wire::record(malformed)).failure_reason.has_value(),
+            "last-prompt metadata rejects an untyped timestamp");
+        malformed = notification;
+        malformed.find("params")->set("v", Json(2));
+        require(inspect(phase, wire::record(malformed)).failure_reason.has_value(),
+            "last-prompt metadata requires its native schema version");
+        malformed = notification;
+        malformed.find("params")->set("sessionId", Json("foreign-session"));
+        require(inspect(phase, wire::record(malformed)).failure_reason.has_value(),
+            "last-prompt metadata cannot cross native session identity");
+    }
+    const auto final = inspect(draining.protocol_state, wire::record(notification), true);
+    require(final.result_bytes == "Done." && !final.failure_reason,
+        "late persisted prompt metadata does not alter the authenticated model answer");
 }
 
 void failures_are_terminal_and_bounded()
@@ -345,11 +666,17 @@ void response_order_is_authenticated()
 
 int main()
 {
+    parent_end_turn_preserves_background_work();
     control_servers_are_session_scoped();
     task_server_receipts_admit_the_session();
     authenticated_transcript_completes();
     completion_is_independent_of_stdout_chunks();
     authentication_catalog_is_advisory();
+    work_accounting_requires_complete_negotiated_coverage();
+    only_fresh_ordered_root_snapshots_allow_close();
+    delayed_children_require_parent_synthesis();
+    conditional_close_handles_races_and_invalid_responses();
+    native_prompt_metadata_is_advisory();
     failures_are_terminal_and_bounded();
     response_order_is_authenticated();
     return 0;

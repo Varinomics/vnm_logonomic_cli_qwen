@@ -5,11 +5,14 @@
 #include <logonomic_cli_addon/package_source.h>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <set>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -24,8 +27,16 @@ namespace addon = logonomic::cli_addon;
 // 560 KiB in a fresh profile. One record stays within the SDK stream bound.
 constexpr std::size_t k_record_limit = 1024 * 1024;
 constexpr std::size_t k_result_limit = 1024 * 1024;
+constexpr std::int64_t k_active_work_interval_ms = 5000;
+constexpr std::int64_t k_active_work_max_interval_ms = 60000;
+constexpr std::int64_t k_active_work_stale_intervals = 3;
+constexpr std::int64_t k_close_drain_timeout_ms = 8000;
+constexpr std::int64_t k_max_rpc_id = 9007199254740991;
+constexpr std::size_t k_active_work_limit = 1024;
+constexpr std::array<std::string_view, 6> k_active_work_categories{
+    "agent", "notification", "shell", "session", "workflow", "tool"};
 
-std::string rpc(int id, const char* method, Json params)
+std::string rpc(std::int64_t id, const char* method, Json params)
 {
     return addon::serialize_json(json_util::object({{"jsonrpc", Json("2.0")}, {"id", Json(id)},
         {"method", Json(method)}, {"params", std::move(params)}})) + '\n';
@@ -76,7 +87,7 @@ bool nonnegative_integer(const Json& value)
         std::floor(value.as_number()) == value.as_number();
 }
 
-bool response(const Json& value, int expected)
+bool response(const Json& value, std::int64_t expected)
 {
     return json_util::exact_keys(value, {"jsonrpc", "id", "result"}) && json_util::text(value, "jsonrpc") == "2.0" &&
         json_util::member(value, "id").is_integer() && json_util::member(value, "id").as_integer() == expected &&
@@ -98,7 +109,7 @@ bool configuration_matches(const Json& value, std::string_view id, std::string_v
     return matched;
 }
 
-std::optional<const char*> response_failure(const Json& value, int expected)
+std::optional<const char*> response_failure(const Json& value, std::int64_t expected)
 {
     if (!json_util::exact_keys(value, {"jsonrpc", "id", "error"}) || json_util::text(value, "jsonrpc") != "2.0" ||
         !json_util::member(value, "id").is_integer() || json_util::member(value, "id").as_integer() != expected) return std::nullopt;
@@ -133,6 +144,159 @@ bool valid_initialize(const Json& result)
     return true;
 }
 
+// Native full snapshots cover both workers and the parent turns consuming
+// their results. A child reaching a terminal status alone is not quiescence.
+struct active_work_state_t
+{
+    std::int64_t interval_ms       = 0;
+    std::int64_t sequence          = 0;
+    std::int64_t observed_at_ms    = 0;
+    std::int64_t close_request_id  = 5;
+    bool         session_observed = false;
+    bool         held             = true;
+};
+
+Json encode_active_work(const active_work_state_t& work)
+{
+    return json_util::object({
+        {"interval_ms", Json(work.interval_ms)},
+        {"sequence", Json(work.sequence)},
+        {"observed_at_ms", Json(work.observed_at_ms)},
+        {"close_request_id", Json(work.close_request_id)},
+        {"session_observed", Json(work.session_observed)},
+        {"held", Json(work.held)}});
+}
+
+std::optional<active_work_state_t> decode_active_work(const Json& value)
+{
+    if (!json_util::exact_keys(value, {"interval_ms", "sequence", "observed_at_ms",
+            "close_request_id", "session_observed", "held"}))
+    {
+        return std::nullopt;
+    }
+    for (const auto key : {"interval_ms", "sequence", "close_request_id"}) {
+        if (!json_util::member(value, key).is_integer() ||
+            !nonnegative_integer(json_util::member(value, key)))
+        {
+            return std::nullopt;
+        }
+    }
+    if (!json_util::member(value, "observed_at_ms").is_integer() ||
+        !json_util::member(value, "session_observed").is_boolean() ||
+        !json_util::member(value, "held").is_boolean())
+    {
+        return std::nullopt;
+    }
+    active_work_state_t work;
+    work.interval_ms       = json_util::member(value, "interval_ms").as_integer();
+    work.sequence          = json_util::member(value, "sequence").as_integer();
+    work.observed_at_ms    = json_util::member(value, "observed_at_ms").as_integer();
+    work.close_request_id  = json_util::member(value, "close_request_id").as_integer();
+    work.session_observed = json_util::member(value, "session_observed").as_boolean();
+    work.held             = json_util::member(value, "held").as_boolean();
+    if ((work.interval_ms != 0 &&
+            (work.interval_ms < k_active_work_interval_ms || work.interval_ms > k_active_work_max_interval_ms)) ||
+        work.close_request_id < 5 || work.close_request_id > k_max_rpc_id)
+    {
+        return std::nullopt;
+    }
+    return work;
+}
+
+std::optional<std::int64_t> active_work_interval(const Json& result)
+{
+    const auto& capability = json_util::member(
+        json_util::member(result, "_meta"), "qwen.daemon.activeWorkHeartbeat");
+    const auto& interval   = json_util::member(capability, "intervalMs");
+    const auto& categories = json_util::member(capability, "categories");
+    if (!capability.is_object() || !json_util::member(capability, "v").is_integer() ||
+        json_util::member(capability, "v").as_integer() != 1 || !interval.is_integer() ||
+        interval.as_integer() < k_active_work_interval_ms || interval.as_integer() > k_active_work_max_interval_ms ||
+        !categories.is_array() || categories.as_array().size() > k_active_work_limit)
+    {
+        return std::nullopt;
+    }
+    std::set<std::string> accepted;
+    for (const auto& category : categories.as_array()) {
+        if (!json_util::bounded_string(category, 128) || !accepted.insert(category.as_string()).second) {
+            return std::nullopt;
+        }
+    }
+    for (const auto category : k_active_work_categories) {
+        if (!accepted.contains(std::string(category))) {
+            return std::nullopt;
+        }
+    }
+    return interval.as_integer();
+}
+
+bool valid_active_work_holds(const Json& holds)
+{
+    if (!holds.is_array() || holds.as_array().size() > k_active_work_limit) {
+        return false;
+    }
+    for (const auto& hold : holds.as_array()) {
+        if (!hold.is_object() || !json_util::bounded_string(json_util::member(hold, "category"), 128) ||
+            !json_util::bounded_string(json_util::member(hold, "id"), 1024))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool accept_active_work(
+    const Json& value, std::string_view session, std::int64_t now_ms, active_work_state_t& work)
+{
+    const auto& params   = json_util::member(value, "params");
+    const auto& sequence = json_util::member(params, "seq");
+    const auto& sessions = json_util::member(params, "sessions");
+    if (!json_util::exact_keys(value, {"jsonrpc", "method", "params"}) ||
+        json_util::text(value, "jsonrpc") != "2.0" || !params.is_object() ||
+        !json_util::member(params, "v").is_integer() || json_util::member(params, "v").as_integer() != 1 ||
+        !sequence.is_integer() || !nonnegative_integer(sequence) || sequence.as_integer() == 0 ||
+        !sessions.is_array() || sessions.as_array().size() > k_active_work_limit)
+    {
+        return false;
+    }
+    std::set<std::string> session_ids;
+    bool observed = false;
+    bool held     = true;
+    for (const auto& record : sessions.as_array()) {
+        const auto& id    = json_util::member(record, "sessionId");
+        const auto& holds = json_util::member(record, "holds");
+        if (!record.is_object() || !json_util::bounded_string(id, 512) ||
+            !session_ids.insert(id.as_string()).second || !valid_active_work_holds(holds) ||
+            (record.find("hasRunningBackgroundTasks") &&
+                !json_util::member(record, "hasRunningBackgroundTasks").is_boolean()) ||
+            (record.find("finishedBackgroundTurnId") &&
+                !json_util::bounded_string(json_util::member(record, "finishedBackgroundTurnId"), 1024)))
+        {
+            return false;
+        }
+        if (id.as_string() == session) {
+            observed = true;
+            held     = !holds.as_array().empty();
+        }
+    }
+    // Native sequence numbers reject reordered/replayed snapshots; a replay
+    // must not renew an old observation's freshness.
+    if (sequence.as_integer() > work.sequence) {
+        work.sequence          = sequence.as_integer();
+        work.observed_at_ms    = now_ms;
+        work.session_observed = observed;
+        work.held             = held;
+    }
+    return true;
+}
+
+bool active_work_is_fresh(const active_work_state_t& work, std::int64_t now_ms)
+{
+    return work.session_observed && now_ms >= work.observed_at_ms &&
+        static_cast<std::uint64_t>(now_ms) - static_cast<std::uint64_t>(work.observed_at_ms) <
+            static_cast<std::uint64_t>(work.interval_ms * k_active_work_stale_intervals);
+}
+
 bool valid_models(const Json& result)
 {
     const auto& models = json_util::member(result, "models");
@@ -163,9 +327,57 @@ bool valid_session(const Json& result)
 bool valid_text_update(const Json& update)
 {
     const auto& content = json_util::member(update, "content");
-    return json_util::only_keys(update, {"sessionUpdate", "content", "_meta"}) && optional_object(update, "_meta") &&
+    if (!(json_util::only_keys(update, {"sessionUpdate", "content", "_meta"}) && optional_object(update, "_meta") &&
         json_util::exact_keys(content, {"type", "text"}) && json_util::text(content, "type") == "text" &&
-        json_util::bounded_string(json_util::member(content, "text"), k_record_limit, true);
+        json_util::bounded_string(json_util::member(content, "text"), k_record_limit, true)))
+    {
+        return false;
+    }
+    const auto& meta = json_util::member(update, "_meta");
+    if (json_util::text(meta, "source") == "background_notification_response") {
+        const auto& task = json_util::member(meta, "backgroundTask");
+        if (!task.is_object() || !json_util::member(task, "turnComplete").is_boolean() ||
+            (task.find("partial") && !json_util::member(task, "partial").is_boolean()))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::optional<bool> root_message(const Json& update)
+{
+    const auto& meta = json_util::member(update, "_meta");
+    bool child = false;
+    for (const auto key : {"parentToolCallId", "subagentType"}) {
+        if (meta.find(key)) {
+            if (!json_util::bounded_string(json_util::member(meta, key), 1024)) {
+                return std::nullopt;
+            }
+            child = true;
+        }
+    }
+    if (const auto* agent = meta.find("agent")) {
+        const auto& depth = json_util::member(*agent, "depth");
+        if (!agent->is_object() || !json_util::bounded_string(json_util::member(*agent, "agentName"), 1024) ||
+            !nonnegative_integer(depth) || !json_util::bounded_string(json_util::member(*agent, "kind"), 128))
+        {
+            return std::nullopt;
+        }
+        const bool root = json_util::text(*agent, "kind") == "root";
+        if (root && (depth.as_number() != 0 || json_util::text(*agent, "agentName") != "/root")) {
+            return std::nullopt;
+        }
+        child = child || !root;
+    }
+    // These are native task-result displays, not the parent's model synthesis.
+    const auto source = json_util::text(meta, "source");
+    return !child && source != "background_notification" && source != "background_task_completed";
+}
+
+bool active_stage(std::string_view stage)
+{
+    return stage == "await_prompt" || stage == "await_active_work" || stage == "await_close";
 }
 
 bool valid_commands(const Json& update)
@@ -234,7 +446,7 @@ bool valid_standard_notification(
     const auto type = json_util::text(update, "sessionUpdate");
     if (type == "available_commands_update") return stage != "await_initialize" && valid_commands(update);
     if (type == "current_mode_update") {
-        return (stage == "await_new" || stage == "await_effort" || stage == "await_prompt") &&
+        return (stage == "await_new" || stage == "await_effort" || active_stage(stage)) &&
             json_util::only_keys(update, {"sessionUpdate", "currentModeId", "_meta"}) && optional_object(update, "_meta") &&
             json_util::bounded_string(json_util::member(update, "currentModeId"), 64);
     }
@@ -244,21 +456,29 @@ bool valid_standard_notification(
             optional_object(update, "_meta");
     }
     if (type == "agent_message_chunk" || type == "agent_thought_chunk" || type == "user_message_chunk") {
-        if (stage != "await_prompt" || !valid_text_update(update)) return false;
+        if (!active_stage(stage) || !valid_text_update(update)) {
+            return false;
+        }
         if (type == "agent_message_chunk") {
-            output += json_util::member(json_util::member(update, "content"), "text").as_string();
+            const auto root = root_message(update);
+            if (!root) {
+                return false;
+            }
+            if (*root) {
+                output += json_util::member(json_util::member(update, "content"), "text").as_string();
+            }
         }
         return output.size() <= k_result_limit;
     }
-    if (type == "tool_call" || type == "tool_call_update") return stage == "await_prompt" && valid_tool(update);
-    if (type == "plan") return stage == "await_prompt" && valid_plan(update);
+    if (type == "tool_call" || type == "tool_call_update") return active_stage(stage) && valid_tool(update);
+    if (type == "plan") return active_stage(stage) && valid_plan(update);
     if (type == "usage_update") {
-        return stage == "await_prompt" && json_util::only_keys(update, {"sessionUpdate", "used", "size", "_meta"}) &&
+        return active_stage(stage) && json_util::only_keys(update, {"sessionUpdate", "used", "size", "_meta"}) &&
             nonnegative_integer(json_util::member(update, "used")) && nonnegative_integer(json_util::member(update, "size")) &&
             json_util::member(update, "size").as_number() > 0 && optional_object(update, "_meta");
     }
     if (type == "session_info_update") {
-        return stage == "await_prompt" && json_util::only_keys(update, {"sessionUpdate", "title", "_meta"}) &&
+        return active_stage(stage) && json_util::only_keys(update, {"sessionUpdate", "title", "_meta"}) &&
             (json_util::member(update, "title").is_null() || json_util::bounded_string(json_util::member(update, "title"), 4096, true)) &&
             optional_object(update, "_meta");
     }
@@ -275,14 +495,20 @@ bool valid_private_notification(const Json& value, std::string_view stage, std::
     if (session != announced_session) return false;
     const auto method = json_util::text(value, "method");
     if (method == "qwen/notify/session/mode-update") {
-        return (stage == "await_new" || stage == "await_effort" || stage == "await_prompt") &&
+        return (stage == "await_new" || stage == "await_effort" || active_stage(stage)) &&
             json_util::exact_keys(params, {"v", "sessionId", "currentModeId"}) && json_util::member(params, "v").is_integer() &&
             json_util::member(params, "v").as_integer() == 1 && json_util::bounded_string(json_util::member(params, "currentModeId"), 64);
     }
     const bool setup_notification = method == "qwen/notify/session/mcp-budget-event" ||
         method == "qwen/notify/session/sources-changed";
-    if (setup_notification) return stage == "await_new" || stage == "await_effort" || stage == "await_prompt";
-    if (stage != "await_prompt") return false;
+    if (setup_notification) return stage == "await_new" || stage == "await_effort" || active_stage(stage);
+    if (!active_stage(stage)) return false;
+    if (method == "qwen/notify/session/last-user-prompt") {
+        const auto& timestamp = json_util::member(params, "timestamp");
+        return json_util::exact_keys(params, {"v", "sessionId", "timestamp"}) &&
+            json_util::member(params, "v").is_integer() && json_util::member(params, "v").as_integer() == 1 &&
+            (timestamp.is_null() || json_util::bounded_string(timestamp, 64));
+    }
     return method == "qwen/notify/session/prompt-suggestion" ||
         method == "qwen/notify/session/title-update" || method == "qwen/notify/session/pr-binding" ||
         method == "qwen/notify/session/recording-degraded" || method == "qwen/notify/session/model-update" ||
@@ -314,6 +540,9 @@ bool valid_drain_notification(const Json& value, std::string session)
     }
     if (!json_util::member(params, "v").is_integer() || json_util::member(params, "v").as_integer() != 1) {
         return false;
+    }
+    if (method == "qwen/notify/session/last-user-prompt") {
+        return valid_private_notification(value, "await_prompt", session);
     }
     if (method == "qwen/notify/session/title-update") {
         return json_util::exact_keys(params, {"v", "sessionId", "title", "titleSource"}) &&
@@ -387,6 +616,108 @@ bool mid_turn_queue_request(const Json& value, std::string_view session)
         !session.empty() && json_util::text(params, "sessionId") == session;
 }
 
+bool background_turn_params(const Json& params, std::string_view session)
+{
+    if (!params.is_object() || session.empty() || json_util::text(params, "sessionId") != session ||
+        json_util::text(params, "source") != "background_notification" ||
+        !json_util::bounded_string(json_util::member(params, "turnId"), 1024) ||
+        !json_util::bounded_string(json_util::member(params, "taskId"), 1024) ||
+        !json_util::bounded_string(json_util::member(params, "kind"), 128) ||
+        !nonnegative_integer(json_util::member(params, "startedAt")))
+    {
+        return false;
+    }
+    for (const auto key : {"toolUseId", "sourceTurnId", "afterPromptId", "label"}) {
+        if (params.find(key) && !json_util::bounded_string(json_util::member(params, key), 4096)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool background_turn_request(const Json& value, std::string_view session)
+{
+    const auto& id = json_util::member(value, "id");
+    return json_util::exact_keys(value, {"jsonrpc", "id", "method", "params"}) &&
+        json_util::text(value, "jsonrpc") == "2.0" &&
+        json_util::text(value, "method") == "_qwencode/start_turn" &&
+        (id.is_integer() || json_util::bounded_string(id, 512)) &&
+        background_turn_params(json_util::member(value, "params"), session);
+}
+
+std::optional<const char*> observe_background_turn(const Json& value, Json& state)
+{
+    const auto method = json_util::text(value, "method");
+    const auto& params = json_util::member(value, "params");
+    if (json_util::text(params, "source") == "background_notification") {
+        if (method == "_qwencode/start_turn") {
+            if (!background_turn_params(params, json_util::text(state, "session_id")) ||
+                !json_util::text(state, "background_turn_id").empty())
+            {
+                return "invalid_acp_background_turn";
+            }
+            state.set("background_turn_id", json_util::member(params, "turnId"));
+            state.set("background_turn_complete", Json(false));
+        }
+        else
+        if (method == "_qwencode/end_turn") {
+            if (!json_util::bounded_string(json_util::member(params, "turnId"), 1024) ||
+                json_util::text(params, "turnId") != json_util::text(state, "background_turn_id"))
+            {
+                return "invalid_acp_background_turn";
+            }
+            const auto reason = json_util::text(params, "reason");
+            if (reason == "cancelled") {
+                return "acp_cancelled";
+            }
+            if (reason != "end_turn") {
+                return "acp_background_incomplete";
+            }
+            // Native errors before the first response segment can still end
+            // with reason=end_turn. Require the typed synthesis completion,
+            // never an error's human-readable text or the first parent reply.
+            if (!json_util::member(state, "background_turn_complete").as_boolean()) {
+                return "acp_background_incomplete";
+            }
+            state.set("background_turn_id", Json(""));
+            state.set("background_turn_complete", Json(false));
+        }
+    }
+    const auto& update = json_util::member(params, "update");
+    const auto& meta   = json_util::member(update, "_meta");
+    if (method == "session/update" && json_util::text(update, "sessionUpdate") == "agent_message_chunk" &&
+        json_util::text(meta, "source") == "background_notification_response")
+    {
+        const auto& task = json_util::member(meta, "backgroundTask");
+        if (json_util::text(task, "turnId").empty() ||
+            json_util::text(task, "turnId") != json_util::text(state, "background_turn_id"))
+        {
+            return "invalid_acp_background_turn";
+        }
+        if (const auto* partial = task.find("partial"); partial && partial->as_boolean()) {
+            return "acp_background_incomplete";
+        }
+        state.set("background_turn_complete", json_util::member(task, "turnComplete"));
+    }
+    return std::nullopt;
+}
+
+bool work_notification(const Json& value)
+{
+    const auto method = json_util::text(value, "method");
+    if (method == "_qwencode/start_turn" || method == "_qwencode/end_turn" ||
+        method == "qwen/notify/session/generation/event")
+    {
+        return true;
+    }
+    if (method != "session/update") {
+        return false;
+    }
+    const auto type = json_util::text(json_util::member(json_util::member(value, "params"), "update"), "sessionUpdate");
+    return type == "agent_message_chunk" || type == "agent_thought_chunk" || type == "user_message_chunk" ||
+        type == "tool_call" || type == "tool_call_update" || type == "plan" || type == "usage_update";
+}
+
 std::string method_not_found(const Json& id)
 {
     return addon::serialize_json(json_util::object({{"jsonrpc", Json("2.0")}, {"id", id},
@@ -395,7 +726,15 @@ std::string method_not_found(const Json& id)
 
 std::string initial_acp_input(const addon::Session_launch_context& context, Json servers)
 {
-    return rpc(1, "initialize", json_util::object({{"protocolVersion", Json(1)}, {"clientCapabilities", Json::object()}})) +
+    auto categories = Json::array();
+    for (const auto category : k_active_work_categories) {
+        categories.push_back(Json(std::string(category)));
+    }
+    auto capability = json_util::object({{"v", Json(1)}, {"intervalMs", Json(k_active_work_interval_ms)},
+        {"categories", std::move(categories)}});
+    return rpc(1, "initialize", json_util::object({
+        {"protocolVersion", Json(1)}, {"clientCapabilities", Json::object()},
+        {"_meta", json_util::object({{"qwen.daemon.activeWorkHeartbeat", std::move(capability)}})}})) +
         rpc(2, "session/new", json_util::object({{"cwd", Json(context.working_directory)}, {"mcpServers", std::move(servers)}}));
 }
 
@@ -502,7 +841,9 @@ std::string initial_acp_state(std::string_view prompt, const std::vector<Task_se
     auto state = json_util::object({{"stage", Json("await_initialize")}, {"pending_base64", Json("")},
         {"deferred_input_base64", Json("")},
         {"prompt_base64", Json(addon::encode_base64(prompt))}, {"session_id", Json("")},
-        {"result_base64", Json("")}, {"receipts", std::move(expected)}, {"task_tools", std::move(tools)}});
+        {"result_base64", Json("")}, {"receipts", std::move(expected)}, {"task_tools", std::move(tools)},
+        {"active_work", encode_active_work({})}, {"background_turn_id", Json("")},
+        {"background_turn_complete", Json(false)}});
     if (selection) {
         state.set("model_selection", addon::encode_delegated_model_selection(*selection));
         state.set("native_model", Json(""));
@@ -510,13 +851,22 @@ std::string initial_acp_state(std::string_view prompt, const std::vector<Task_se
     return addon::serialize_json(state);
 }
 
-addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection& inspection)
+addon::Structured_inspect_result inspect_acp(
+    const addon::Structured_inspection& inspection, std::chrono::steady_clock::time_point now)
 {
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
     auto parsed = addon::parse_exchange_protocol_state(inspection.protocol_state);
     if (!parsed || !json_util::only_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id",
-            "result_base64", "receipts", "task_tools", "model_selection", "native_model"}) ||
+            "result_base64", "receipts", "task_tools", "model_selection", "native_model", "active_work", "background_turn_id",
+            "background_turn_complete"}) ||
         !json_util::member(*parsed, "stage").is_string() || !json_util::bounded_string(json_util::member(*parsed, "session_id"), 512, true) ||
+        !json_util::bounded_string(json_util::member(*parsed, "background_turn_id"), 1024, true) ||
+        !json_util::member(*parsed, "background_turn_complete").is_boolean() ||
         !valid_receipts(json_util::member(*parsed, "receipts"))) {
+        return failure("malformed_acp_state");
+    }
+    auto active_work = decode_active_work(json_util::member(*parsed, "active_work"));
+    if (!active_work) {
         return failure("malformed_acp_state");
     }
     if (!json_util::member(*parsed, "task_tools").is_array()) return failure("malformed_acp_state");
@@ -537,8 +887,13 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
     auto state = std::move(*parsed);
     const auto initial_stage = json_util::text(state, "stage");
     if (initial_stage != "await_initialize" && initial_stage != "await_new" &&
-        initial_stage != "await_prompt" && initial_stage != "await_effort" &&
+        !active_stage(initial_stage) && initial_stage != "await_effort" &&
         initial_stage != "await_drain") return failure("malformed_acp_state");
+    if ((initial_stage != "await_initialize" && active_work->interval_ms == 0) ||
+        (initial_stage == "await_close" && active_work->close_request_id == 5))
+    {
+        return failure("malformed_acp_state");
+    }
     for (const auto key : {"pending_base64", "deferred_input_base64", "prompt_base64", "result_base64"}) {
         if (!json_util::member(state, key).is_string()) return failure("malformed_acp_state");
     }
@@ -551,7 +906,7 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
     if ((initial_stage == "await_initialize" && (!state_session.empty() || !output->empty())) ||
         (initial_stage == "await_new" && !output->empty()) ||
         (initial_stage == "await_effort" && (!selection.reasoning_effort || state_session.empty() || !output->empty())) ||
-        ((initial_stage == "await_prompt" || initial_stage == "await_drain") &&
+        ((active_stage(initial_stage) || initial_stage == "await_drain") &&
             (state_session.empty() || !prompt->empty())) ||
         (initial_stage == "await_drain" && output->empty())) {
         return failure("malformed_acp_state");
@@ -586,6 +941,14 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         if (!value || !value->is_object()) return failure("invalid_acp_record");
         auto stage   = json_util::text(state, "stage");
         auto session = json_util::text(state, "session_id");
+        if (json_util::text(*value, "method") == "qwen/notify/channel/active-work") {
+            // The native reporter starts during initialize and can outlive a
+            // successful session close until this client supplies EOF.
+            if (!accept_active_work(*value, session, now_ms, *active_work)) {
+                return failure("invalid_acp_active_work");
+            }
+            continue;
+        }
         if (selection.model && json_util::text(*value, "method") == "qwen/notify/session/model-update" &&
             json_util::text(json_util::member(*value, "params"), "currentModelId") != json_util::text(state, "native_model"))
         {
@@ -599,14 +962,27 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         }
         if (value->find("method")) {
             if (value->find("id")) {
-                if (!input.empty() || stage != "await_prompt") return failure("unsupported_acp_reverse_request");
+                if (!input.empty() || !active_stage(stage)) {
+                    return failure("unsupported_acp_reverse_request");
+                }
                 if (json_util::text(*value, "method") == "session/request_permission") {
                     const auto reply = permission_reply(*value, state);
                     if (reply.empty()) return failure("task_permission_response_unavailable");
                     replies += reply;
                 }
                 else if (mid_turn_queue_request(*value, session)) replies += method_not_found(json_util::member(*value, "id"));
-                else return failure("unsupported_acp_reverse_request");
+                else
+                if (background_turn_request(*value, session) && json_util::text(state, "background_turn_id").empty()) {
+                    state.set("background_turn_id", json_util::member(json_util::member(*value, "params"), "turnId"));
+                    state.set("background_turn_complete", Json(false));
+                    // Qwen explicitly supports -32601 for clients without a
+                    // host-owned automatic-turn admission policy.
+                    replies += method_not_found(json_util::member(*value, "id"));
+                }
+                else {
+                    return failure("unsupported_acp_reverse_request");
+                }
+                active_work->session_observed = false;
                 continue;
             }
             if (!input.empty()) {
@@ -623,9 +999,19 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
             if (!valid_standard_notification(*value, stage, session, *output) &&
                 !valid_private_notification(*value, stage, session)) return failure("unauthenticated_acp_notification");
             state.set("session_id", Json(session));
+            if (const auto reason = observe_background_turn(*value, state)) {
+                return failure(*reason);
+            }
+            if (work_notification(*value)) {
+                active_work->session_observed = false;
+            }
             continue;
         }
-        const int expected = stage == "await_initialize" ? 1 : stage == "await_new" ? 2 : stage == "await_effort" ? 3 : prompt_id;
+        if (stage == "await_active_work") {
+            return failure("out_of_order_acp_response");
+        }
+        const std::int64_t expected = stage == "await_initialize" ? 1 : stage == "await_new" ? 2 :
+            stage == "await_effort" ? 3 : stage == "await_close" ? active_work->close_request_id : prompt_id;
         if (const auto reason = response_failure(*value, expected)) {
             return failure(stage == "await_effort" && std::string_view(*reason) == "acp_request_failed"
                 ? "reasoning_effort_unavailable" : *reason);
@@ -634,6 +1020,11 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         const auto& result = json_util::member(*value, "result");
         if (stage == "await_initialize") {
             if (!response(*value, 1) || !valid_initialize(result)) return failure("invalid_acp_initialize");
+            const auto interval = active_work_interval(result);
+            if (!interval) {
+                return failure("acp_active_work_unavailable");
+            }
+            active_work->interval_ms = *interval;
             state.set("stage", Json("await_new"));
         }
         else if (stage == "await_new") {
@@ -667,15 +1058,42 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
                 return failure("invalid_acp_completion");
             }
             if (json_util::text(result, "stopReason") == "cancelled") return failure("acp_cancelled");
-            if (json_util::text(result, "stopReason") != "end_turn" || output->empty()) return failure("invalid_acp_completion");
-            completed = true;
-            state.set("stage", Json("await_drain"));
+            if (json_util::text(result, "stopReason") != "end_turn") return failure("invalid_acp_completion");
+            state.set("stage", Json("await_active_work"));
+        }
+        else
+        if (stage == "await_close") {
+            if (!response(*value, expected) || !json_util::only_keys(result, {"sessionId", "closed", "holds"}) ||
+                json_util::text(result, "sessionId") != session || !json_util::member(result, "closed").is_boolean())
+            {
+                return failure("invalid_acp_close");
+            }
+            if (json_util::member(result, "closed").as_boolean()) {
+                if (result.find("holds") || !json_util::text(state, "background_turn_id").empty()) {
+                    return failure("invalid_acp_close");
+                }
+                if (output->empty()) {
+                    return failure("invalid_acp_completion");
+                }
+                completed = true;
+                state.set("stage", Json("await_drain"));
+            }
+            else {
+                const auto& holds = json_util::member(result, "holds");
+                if (!valid_active_work_holds(holds) || holds.as_array().empty()) {
+                    return failure("invalid_acp_close");
+                }
+                // A refusal supersedes every snapshot already received; wait
+                // for newer evidence before proposing another close.
+                active_work->session_observed = false;
+                state.set("stage", Json("await_active_work"));
+            }
         }
     }
     if (remaining.size() > k_record_limit) return failure("acp_record_limit");
     if (completed && inspection.final) {
-        // Native startup can finish asynchronous command discovery after the
-        // prompt response. EOF settles that tail without dropping any bytes.
+        // The native conditional close settled owned work. Clean process exit
+        // still guards buffered output and the asynchronous advisory tail.
         if (inspection.timed_out || inspection.exit_code != 0) {
             return failure(inspection.timed_out ? "acp_timeout" : "acp_process_failed");
         }
@@ -688,6 +1106,19 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
         return result;
     }
     if (inspection.final) return failure(inspection.timed_out ? "acp_timeout" : "acp_incomplete");
+    if (json_util::text(state, "stage") == "await_active_work" && remaining.empty() &&
+        json_util::text(state, "background_turn_id").empty() &&
+        active_work_is_fresh(*active_work, now_ms) && !active_work->held)
+    {
+        if (active_work->close_request_id == k_max_rpc_id) {
+            return failure("acp_request_id_limit");
+        }
+        ++active_work->close_request_id;
+        state.set("stage", Json("await_close"));
+        input = rpc(active_work->close_request_id, "qwen/control/session/close", json_util::object({
+            {"sessionId", json_util::member(state, "session_id")}, {"onlyIfUnheld", Json(true)},
+            {"requireFlush", Json(true)}, {"drainTimeoutMs", Json(k_close_drain_timeout_ms)}}));
+    }
     // Never release a native request over an already observed, unclassified
     // output prefix. Complete housekeeping may be accepted, but a task reply
     // produced before its request must still be rejected on the next call.
@@ -695,6 +1126,7 @@ addon::Structured_inspect_result inspect_acp(const addon::Structured_inspection&
     state.set("deferred_input_base64", Json(defer_input ? addon::encode_base64(input) : ""));
     state.set("pending_base64", Json(addon::encode_base64(remaining)));
     state.set("result_base64", Json(addon::encode_base64(*output)));
+    state.set("active_work", encode_active_work(*active_work));
     addon::Structured_inspect_result result;
     result.protocol_state = addon::serialize_json(state);
     result.close_stdin = completed && initial_stage != "await_drain";
