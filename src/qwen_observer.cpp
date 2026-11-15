@@ -5,7 +5,7 @@
 #include "qwen_metadata_file_p.h"
 #include "qwen_profile.h"
 
-#include <logonomic_cli_addon/lifecycle_correlation_lifetime.h>
+#include <logonomic_cli_addon/filesystem_lifecycle_observer.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/sha256.h>
 
@@ -14,16 +14,12 @@
 #include <QStringList>
 
 #include <algorithm>
-#include <charconv>
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <deque>
 #include <filesystem>
 #include <map>
-#include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -31,7 +27,6 @@
 #include <string_view>
 #include <system_error>
 #include <utility>
-#include <vector>
 
 namespace qwen {
 namespace {
@@ -42,52 +37,18 @@ namespace fs          = std::filesystem;
 namespace observation = vnm::filesystem_observation;
 namespace path_name   = vnm::path_name;
 
-using Clock = std::chrono::steady_clock;
-
 constexpr std::size_t k_metadata_bound = 1024 * 1024;
-constexpr std::size_t k_session_bound  = 256;
 constexpr std::size_t k_retained_bound = 4096;
-constexpr std::size_t k_active_bound   = 128;
 
 class Observation_failure final : public std::runtime_error
 {
 public:
     explicit Observation_failure(const char* reason)
+
     :
         std::runtime_error(reason)
     {}
 };
-
-struct Cursor
-{
-    std::string key;
-    std::uint64_t sequence = 0;
-};
-
-Cursor cursor_for(const addon::Session_correlation& correlation, std::string_view value)
-{
-    if (value.empty()) {
-        return {correlation.transition_nonce, 0};
-    }
-    const auto separator = value.find(':');
-    if (separator == std::string_view::npos || value.substr(0, separator) != correlation.transition_nonce) {
-        throw Observation_failure("invalid_observation_cursor");
-    }
-    Cursor cursor{correlation.transition_nonce, 0};
-    const auto suffix = value.substr(separator + 1);
-    const auto parsed = std::from_chars(suffix.data(), suffix.data() + suffix.size(), cursor.sequence);
-    if (suffix.empty() || parsed.ec != std::errc{} || parsed.ptr != suffix.data() + suffix.size() ||
-        std::to_string(cursor.sequence) != suffix)
-    {
-        throw Observation_failure("invalid_observation_cursor");
-    }
-    return cursor;
-}
-
-std::string cursor_text(const Cursor& cursor)
-{
-    return cursor.key + ':' + std::to_string(cursor.sequence);
-}
 
 std::string filename_component(const std::string& value)
 {
@@ -191,49 +152,22 @@ struct Child
     bool active = true;
 };
 
-struct Binding
+struct Binding final : addon::Filesystem_lifecycle_binding
 {
-    std::string session;
-    std::string nonce;
     fs::path directory;
     std::map<std::string, Child> children;
     std::set<std::string> starts;
-    std::deque<addon::Lifecycle_observation> queue;
-    std::uint64_t first_sequence = 0;
-    std::uint64_t next_sequence  = 0;
-    std::size_t active_children = 0;
-    observation::Subscription subscription;
-    std::shared_ptr<observation::Wait_channel> channel;
-    QStringList watched_files;
-    QStringList watched_directories;
-    std::string failure;
-    std::optional<std::string> final_cursor;
-    bool observing = false;
-    bool watch_dirty = true;
-    bool closed = false;
-    bool retired = false;
+
+    observation::Subscription_options interests(const addon::Filesystem_lifecycle_bindings&) override;
+    bool reconcile(addon::Invocation_context*) override;
+    void check_owner(const addon::Filesystem_lifecycle_bindings& bindings) override;
+    void release() override
+    {
+        directory.clear();
+        children.clear();
+        starts.clear();
+    }
 };
-
-void stop_observation(Binding& binding)
-{
-    binding.subscription.reset();
-    if (binding.channel) {
-        binding.channel->cancel();
-    }
-    binding.channel.reset();
-    binding.watched_files.clear();
-    binding.watched_directories.clear();
-}
-
-void enqueue(Binding& binding, addon::Lifecycle_observation event)
-{
-    if (binding.queue.size() == k_retained_bound) {
-        binding.failure = "subagent_observation_queue_capacity_exhausted";
-        throw Observation_failure("subagent_observation_queue_capacity_exhausted");
-    }
-    ++binding.next_sequence;
-    binding.queue.push_back(std::move(event));
-}
 
 void child_event(Binding& binding, Child& child, bool started)
 {
@@ -246,14 +180,9 @@ void child_event(Binding& binding, Child& child, bool started)
     event.subagent_transition = started ? addon::Subagent_transition::STARTED
                                        : addon::Subagent_transition::STOPPED;
     // Per-child resume counters are not the host's session-wide sequence.
-    enqueue(binding, std::move(event));
-    child.active = started;
-    binding.watch_dirty = true;
-    if (started) {
-        ++binding.active_children;
-    }
-    else {
-        --binding.active_children;
+    if (binding.publish(std::move(event))) {
+        child.active = started;
+        binding.watch_dirty = true;
     }
 }
 
@@ -313,9 +242,6 @@ bool directory_exists(const fs::path& path)
 {
     std::error_code error;
     const bool exists = fs::is_directory(native_io_path(path), error);
-    if (error && error != std::errc::no_such_file_or_directory && error != std::errc::not_a_directory) {
-        throw Observation_failure("subagent_directory_unavailable");
-    }
     return exists;
 }
 
@@ -324,90 +250,68 @@ QString watch_path(const fs::path& path)
     return path_name::normalized(QString::fromStdString(path_string(path)));
 }
 
-bool update_observation(
-    Binding& binding, observation::Service& service, const observation::Configuration& configuration)
+bool Binding::reconcile(addon::Invocation_context*)
 {
-    if (binding.directory.empty()) {
-        binding.watch_dirty = false;
-        return false;
+    return scan(*this);
+}
+
+observation::Subscription_options Binding::interests(const addon::Filesystem_lifecycle_bindings&)
+{
+    if (directory.empty()) {
+        return {};
     }
     QStringList files;
     QStringList directories;
-    fs::path frontier = binding.directory;
+    fs::path frontier = directory;
     while (!directory_exists(frontier.parent_path()) && frontier.parent_path() != frontier) {
         frontier = frontier.parent_path();
     }
     files.append(watch_path(frontier));
-    if (directory_exists(binding.directory)) {
-        directories.append(watch_path(binding.directory));
-        for (const auto& [id, child] : binding.children) {
+    if (directory_exists(directory)) {
+        directories.append(watch_path(directory));
+        for (const auto& [id, child] : children) {
             (void)id;
             if (child.active) {
                 files.append(watch_path(child.path));
             }
         }
     }
-    files.removeDuplicates();
-    files.sort();
-    if (binding.channel && files == binding.watched_files && directories == binding.watched_directories) {
-        binding.watch_dirty = false;
-        return false;
-    }
-    observation::Subscription_options options;
-    options.mode         = observation::Watch_mode::DIRECT;
-    options.interval     = configuration.general_interval;
-    options.policy_epoch = std::make_shared<path_name::Policy_epoch>();
-    options.exact_files  = files;
-    QList<path_name::Key> keys;
-    for (const auto& path : files) {
-        keys.append(options.policy_epoch->key(path));
-    }
-    for (const auto& directory : directories) {
-        options.directories.append({directory, 0});
-    }
-    options.classifier = [keys](const observation::Event& event) {
-        return std::any_of(keys.cbegin(), keys.cend(), [&](const auto& key) {
-            return path_name::matches_key(event.path, key) || path_name::matches_key(event.old_path, key);
-        });
-    };
-    auto channel = std::make_shared<observation::Wait_channel>();
-    auto subscription = service.subscribe(std::move(options), channel);
-    stop_observation(binding);
-    binding.subscription        = std::move(subscription);
-    binding.channel             = std::move(channel);
-    binding.watched_files       = std::move(files);
-    binding.watched_directories = std::move(directories);
-    binding.watch_dirty = false;
-    return true;
+    return addon::lifecycle_file_interests(std::move(files), std::move(directories));
 }
 
-bool observation_covered(const Binding& binding)
+void Binding::check_owner(const addon::Filesystem_lifecycle_bindings& bindings)
 {
-    for (const auto& file : binding.watched_files) {
-        if (!binding.subscription.covers_directory(QFileInfo(file).absolutePath())) {
-            return false;
+    if (directory.empty() || closed) {
+        return;
+    }
+    const auto spelling = watch_path(directory);
+    path_name::Policy_epoch policy;
+    for (const auto& [nonce, value] : bindings) {
+        (void)nonce;
+        const auto other = std::static_pointer_cast<Binding>(value);
+        if (other && other.get() != this && !other->closed && !other->directory.empty() &&
+            policy.same(spelling, watch_path(other->directory)))
+        {
+            throw Observation_failure("subagent_session_already_bound");
         }
     }
-    for (const auto& directory : binding.watched_directories) {
-        if (!binding.subscription.covers_directory(directory)) {
-            return false;
-        }
-    }
-    return true;
 }
 
 } // namespace
 
 struct Lifecycle_observer::State
 {
-    std::shared_ptr<observation::Service> service;
-    observation::Configuration configuration;
-    std::mutex mutex;
-    // Null values are reservations; only authenticated classification binds them.
-    std::map<std::string, std::shared_ptr<Binding>> sessions;
+    State(std::shared_ptr<observation::Service> service, observation::Configuration configuration)
+
+    :
+        driver(std::move(service), configuration)
+    {}
+
+    addon::Filesystem_lifecycle_observer driver;
 };
 
 Lifecycle_observer::Lifecycle_observer()
+
 :
     Lifecycle_observer(std::make_shared<observation::Service>(), {})
 {}
@@ -415,16 +319,10 @@ Lifecycle_observer::Lifecycle_observer()
 Lifecycle_observer::Lifecycle_observer(
     std::shared_ptr<observation::Service> service,
     observation::Configuration configuration)
+
 :
-    m_state(std::make_unique<State>())
-{
-    if (!service) {
-        throw std::invalid_argument("Qwen observer requires a process observation service");
-    }
-    configuration.validate();
-    m_state->service       = std::move(service);
-    m_state->configuration = configuration;
-}
+    m_state(std::make_unique<State>(std::move(service), configuration))
+{}
 
 Lifecycle_observer::~Lifecycle_observer() = default;
 
@@ -433,15 +331,15 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
     auto result = qwen::classify_event(request);
     const auto session = json::text(request.event.body, "session_id");
     const auto& name = request.event.name;
-    std::lock_guard lock(m_state->mutex);
+    auto& driver = m_state->driver;
+    auto guard = driver.lock();
     if (result.classification == addon::Classification::TRANSITION && name == "SessionStart") {
-        const auto found = m_state->sessions.find(request.transition_nonce);
-        if (found == m_state->sessions.end()) {
+        if (!driver.reserved(request.transition_nonce)) {
             throw Observation_failure("correlation_not_reserved");
         }
         const auto directory = child_directory(request.event.body, session);
-        if (found->second) {
-            if (found->second->session != session || found->second->directory != directory) {
+        if (const auto existing = driver.find(request.transition_nonce)) {
+            if (existing->session != session) {
                 throw Observation_failure("subagent_session_already_bound");
             }
             return result;
@@ -450,18 +348,18 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
         binding->session   = session;
         binding->nonce     = request.transition_nonce;
         binding->directory = directory;
-        found->second = std::move(binding);
+        driver.bind(std::move(binding));
         return result;
     }
     const auto& current = request.ledger.current_transition;
     if (!current || request.ledger.current_epoch == 0 || current->provider_session_id != session) {
         return result;
     }
-    const auto found = m_state->sessions.find(current->nonce);
-    if (found == m_state->sessions.end() || !found->second || found->second->session != session) {
+    const auto owner = std::static_pointer_cast<Binding>(driver.find(current->nonce));
+    if (!owner || owner->session != session) {
         return result;
     }
-    auto& binding = *found->second;
+    auto& binding = *owner;
     if (binding.closed || binding.retired) {
         return {};
     }
@@ -470,41 +368,34 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
     {
         // The root's terminal fact follows already admitted child facts. Its
         // final cursor, rather than a watch timeout, releases this correlation.
-        enqueue(binding, std::move(result.observations.front()));
+        binding.finish(std::move(result.observations.front()));
         result.observations.clear();
         result.classification = addon::Classification::IGNORED;
-        binding.closed = true;
-        stop_observation(binding);
         return result;
     }
     if (name != "SubagentStart") {
         return result;
-    }
-    if (!binding.failure.empty()) {
-        throw Observation_failure("subagent_observation_unavailable");
     }
     const auto& body = request.event.body;
     if (!json::bounded_string(json::member(body, "agent_id"), 256) ||
         !json::bounded_string(json::member(body, "event_id"), 256) ||
         !json::bounded_string(json::member(body, "agent_type"), 160))
     {
-        throw Observation_failure("subagent_hook_identity_invalid");
+        return result;
     }
     const auto event_id = json::text(body, "event_id");
     if (binding.starts.contains(event_id)) {
         return result;
     }
     if (binding.directory.empty()) {
-        throw Observation_failure("subagent_store_unavailable");
+        return result;
     }
     const auto agent = json::text(body, "agent_id");
     auto previous = binding.children.find(agent);
     if (binding.starts.size() == k_retained_bound ||
-        (previous == binding.children.end() && binding.children.size() == k_retained_bound) ||
-        (binding.active_children == k_active_bound &&
-            (previous == binding.children.end() || !previous->second.active)))
+        (previous == binding.children.end() && binding.children.size() == k_retained_bound))
     {
-        throw Observation_failure("subagent_identity_capacity_exhausted");
+        return result;
     }
     Child child;
     child.native_id = agent;
@@ -523,74 +414,24 @@ addon::Classify_event_result Lifecycle_observer::classify(const addon::Classify_
         // hooks themselves are blockable and never enter this path.
         child_event(binding, previous->second, false);
     }
+    if (!binding.can_start_child()) {
+        return result;
+    }
     binding.starts.insert(event_id);
     auto inserted = binding.children.insert_or_assign(agent, std::move(child)).first;
     child_event(binding, inserted->second, true);
-    if (binding.channel) {
-        binding.subscription.request_rescan(QStringLiteral("Qwen child start admitted"));
-    }
+    binding.request_rescan();
     return result;
 }
 
 void Lifecycle_observer::handle(addon::Invocation_context& context)
 {
+    if (m_state->driver.handle(context)) {
+        return;
+    }
     try {
         addon::Contract_failure failure;
         const auto& invocation = context.request();
-        if (invocation.capability.capability_id == "lifecycle-correlation-lifetime") {
-            if (invocation.operation == addon::k_lifecycle_correlation_lifetime_reserve_operation) {
-                const auto request = addon::decode_lifecycle_correlation_reserve_request(invocation.payload, &failure);
-                if (!request) {
-                    context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
-                    return;
-                }
-                std::lock_guard lock(m_state->mutex);
-                if (context.cancel_requested()) {
-                    context.fail(addon::Result_status::CANCELLED, "cancelled");
-                    return;
-                }
-                if (!m_state->sessions.contains(request->correlation.transition_nonce)) {
-                    if (m_state->sessions.size() == k_session_bound) {
-                        throw Observation_failure("subagent_session_capacity_exhausted");
-                    }
-                    m_state->sessions.emplace(request->correlation.transition_nonce, nullptr);
-                }
-                context.succeed(addon::encode_lifecycle_correlation_lifetime_ack());
-            }
-            else
-            if (invocation.operation == addon::k_lifecycle_correlation_lifetime_retire_operation) {
-                const auto request = addon::decode_lifecycle_correlation_retire_request(invocation.payload, &failure);
-                if (!request) {
-                    context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
-                    return;
-                }
-                std::lock_guard lock(m_state->mutex);
-                const auto found = m_state->sessions.find(request->correlation.transition_nonce);
-                if (found != m_state->sessions.end()) {
-                    const auto binding = found->second;
-                    if (request->disposition == addon::Lifecycle_correlation_retire_disposition::TERMINAL_CONSUMED &&
-                        (!binding || !binding->closed || !binding->final_cursor ||
-                            binding->final_cursor != request->consumed_cursor))
-                    {
-                        throw Observation_failure("terminal_cursor_not_consumed");
-                    }
-                    if (binding) {
-                        binding->retired = true;
-                        stop_observation(*binding);
-                        binding->children.clear();
-                        binding->starts.clear();
-                        binding->queue.clear();
-                        binding->directory.clear();
-                    }
-                    m_state->sessions.erase(found);
-                }
-                context.succeed(addon::encode_lifecycle_correlation_lifetime_ack());
-            }
-            else {
-                context.reject_unknown_operation();
-            }
-            return;
-        }
         if (invocation.operation == "classify_event") {
             if (invocation.capability.capability_id == addon::k_attention_kind_capability_id) {
                 const auto request = addon::decode_attention_classification_request(invocation.payload, &failure);
@@ -617,171 +458,7 @@ void Lifecycle_observer::handle(addon::Invocation_context& context)
             }
             return;
         }
-        if (invocation.operation == "poll_observations") {
-            const auto request = addon::decode_poll_observations_request(invocation.payload, &failure);
-            if (!request) {
-                context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
-                return;
-            }
-            if (!request->correlation) {
-                context.fail(addon::Result_status::UNAVAILABLE, "session_start_required");
-                return;
-            }
-            const auto cursor = cursor_for(*request->correlation, request->resume_cursor);
-            std::lock_guard lock(m_state->mutex);
-            const auto found = m_state->sessions.find(cursor.key);
-            if (found == m_state->sessions.end() || !found->second) {
-                throw Observation_failure("unknown_observation_cursor");
-            }
-            auto& binding = *found->second;
-            if (!binding.failure.empty()) {
-                context.fail(addon::Result_status::FAILED, binding.failure);
-                return;
-            }
-            if (cursor.sequence < binding.first_sequence || cursor.sequence > binding.next_sequence) {
-                throw Observation_failure("invalid_observation_cursor");
-            }
-            while (binding.first_sequence < cursor.sequence) {
-                binding.queue.pop_front();
-                ++binding.first_sequence;
-            }
-            addon::Poll_observations_result result;
-            const auto count = std::min(request->limit, binding.queue.size());
-            result.observations.assign(binding.queue.begin(), binding.queue.begin() + (std::ptrdiff_t)count);
-            result.resume_cursor = cursor_text({cursor.key, cursor.sequence + count});
-            result.more = count < binding.queue.size();
-            if (binding.closed && !result.more) {
-                binding.final_cursor = result.resume_cursor;
-            }
-            context.succeed(addon::encode_poll_observations_result(result));
-            return;
-        }
-        if (invocation.operation != "observe") {
-            context.reject_unknown_operation();
-            return;
-        }
-        const auto request = addon::decode_observe_request(invocation.payload, &failure);
-        if (!request) {
-            context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
-            return;
-        }
-        if (!request->correlation) {
-            context.fail(addon::Result_status::UNAVAILABLE, "session_start_required");
-            return;
-        }
-        const auto cursor = cursor_for(*request->correlation, request->resume_cursor);
-        std::shared_ptr<Binding> binding;
-        std::uint64_t window_sequence = 0;
-        {
-            std::lock_guard lock(m_state->mutex);
-            const auto found = m_state->sessions.find(cursor.key);
-            if (found == m_state->sessions.end() || !found->second ||
-                found->second->session != request->session.provider_session_id)
-            {
-                context.fail(addon::Result_status::UNAVAILABLE, "session_start_required");
-                return;
-            }
-            binding = found->second;
-            if (binding->observing || cursor.sequence > binding->next_sequence) {
-                throw Observation_failure("invalid_observation_cursor");
-            }
-            if (!binding->directory.empty() && !binding->closed) {
-                const auto spelling = watch_path(binding->directory);
-                path_name::Policy_epoch policy;
-                for (const auto& [nonce, other] : m_state->sessions) {
-                    (void)nonce;
-                    if (other && other != binding && !other->closed && !other->directory.empty() &&
-                        policy.same(spelling, watch_path(other->directory)))
-                    {
-                        throw Observation_failure("subagent_session_already_bound");
-                    }
-                }
-            }
-            // Polling alone acknowledges queue entries. The final drain of a
-            // completed watch may advance consumption beyond its watch cursor.
-            window_sequence = std::max(cursor.sequence, binding->first_sequence);
-            binding->observing = true;
-        }
-        std::string error;
-        const auto deadline = Clock::now() + std::chrono::milliseconds(request->window_ms);
-        auto reported_sequence = window_sequence;
-        try {
-            while (!context.cancel_requested() && Clock::now() < deadline) {
-                std::shared_ptr<observation::Wait_channel> channel;
-                {
-                    std::lock_guard lock(m_state->mutex);
-                    if (binding->retired) {
-                        break;
-                    }
-                    if (!binding->failure.empty()) {
-                        error = binding->failure;
-                        break;
-                    }
-                    if (binding->next_sequence > reported_sequence) {
-                        reported_sequence = binding->next_sequence;
-                        const auto available = reported_sequence - window_sequence;
-                        context.report_progress(available, std::nullopt, addon::observe_progress_note(available));
-                    }
-                    if (binding->closed) {
-                        break;
-                    }
-                    if (!binding->channel || binding->watch_dirty) {
-                        update_observation(*binding, *m_state->service, m_state->configuration);
-                    }
-                    channel = binding->channel;
-                }
-                if (!channel) {
-                    // Recording can be disabled without disabling root hooks.
-                    // This wait bounds cancellation only; it performs no scans.
-                    context.wait_for_cancel(100);
-                    continue;
-                }
-                const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now());
-                auto delivery = channel->wait(std::min(remaining, std::chrono::milliseconds(100)));
-                if (!delivery) {
-                    continue;
-                }
-                {
-                    std::lock_guard lock(m_state->mutex);
-                    if (delivery->valid() && !binding->retired && !binding->closed && binding->channel == channel) {
-                        const bool replaced = update_observation(
-                            *binding, *m_state->service, m_state->configuration);
-                        if (!replaced) {
-                            if (scan(*binding) && observation_covered(*binding)) {
-                                binding->subscription.acknowledge(delivery->batch.capture);
-                            }
-                            else {
-                                // The shared service paces retries at the subscription's
-                                // interval. One unreadable child cannot poison root hooks
-                                // or prevent other children from publishing their facts.
-                                binding->subscription.request_rescan(QStringLiteral("Qwen child evidence incomplete"));
-                            }
-                        }
-                    }
-                }
-                delivery->completion.complete();
-            }
-        }
-        catch (const Observation_failure& exception) {
-            error = exception.what();
-        }
-        catch (const std::exception&) {
-            error = "subagent_observation_failed";
-        }
-        std::lock_guard lock(m_state->mutex);
-        binding->observing = false;
-        if (binding->retired || context.cancel_requested()) {
-            context.fail(addon::Result_status::CANCELLED, binding->retired ? "correlation_retired" : "cancelled");
-        }
-        else
-        if (!error.empty()) {
-            binding->failure = error;
-            stop_observation(*binding);
-            context.fail(addon::Result_status::FAILED, error);
-        }
-        else {
-            context.succeed(addon::encode_observe_result({cursor_text({cursor.key, binding->next_sequence})}));
-        }
+        context.reject_unknown_operation();
     }
     catch (const Observation_failure& exception) {
         context.fail(addon::Result_status::FAILED, exception.what());

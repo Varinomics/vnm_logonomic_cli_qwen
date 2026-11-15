@@ -77,7 +77,8 @@ notifications provide unpaired inferred attention.
 
 Native `SubagentStart` hooks enroll children under the authenticated current root
 activation. The adapter observes those children's exact metadata files through
-the owned filesystem observation service. Only persisted `completed`, `failed`,
+the SDK's shared filesystem lifecycle driver and the owned filesystem observation
+service. Only persisted `completed`, `failed`,
 `cancelled`, or `paused` state closes an admitted child attempt; `SubagentStop`
 alone does not, because that hook precedes Qwen's blockable completion gate.
 Repeated helper delivery is idempotent, and a resumed child receives a distinct
@@ -89,6 +90,12 @@ continues for the root and other children. Detached interactive forks that do
 not persist terminal metadata remain open until the root session ends. Set
 `run_in_background: true` when starting a top-level interactive fork to use Qwen's
 background path with persisted completion metadata.
+
+The shared driver retains correlation reservations, independent watch and poll
+cursors, and filesystem subscriptions. It refuses new child admissions locally
+at the host's 128-active-child bound or when its bounded queue cannot reserve
+their terminal facts. Already admitted child stops and root SessionEnd retain
+their queue space; capacity refusal does not disable root lifecycle tracking.
 
 Observation requires the root hook's native transcript location. It does not
 discover children by scanning other projects or replaying stored history, and
@@ -236,7 +243,7 @@ generator. Compiler-invoking commands must use the applicable queued-build
 policy. The provider CI's preparation callback acquires the selected platform's
 Qt kit, matching notices, and current owned sources before configuration.
 
-The package places `qwen_adapter`, `qwen_helper` and `qwen_launch_bridge` in
+The SDK's shared Qt recipe places `qwen_adapter`, `qwen_helper` and `qwen_launch_bridge` in
 `adapter/` (with `.exe` on Windows). The producer resolves and indexes their
 complete non-system runtime closure. Windows and Linux share the adapter
 directory's libraries; macOS uses the SDK's native deployment

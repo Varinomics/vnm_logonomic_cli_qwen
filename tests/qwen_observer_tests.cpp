@@ -526,6 +526,39 @@ void cancellation_and_cursor_isolation()
         "retirement releases native filesystem subscriptions");
 }
 
+void capacity_refuses_only_new_child_admissions()
+{
+    Fixture fixture;
+    for (int index = 0; index < 129; ++index) {
+        fixture.m_observer.classify(fixture.hook("SubagentStart", "child-" + std::to_string(index)));
+    }
+    std::string cursor;
+    std::size_t admitted = 0;
+    std::string first_agent;
+    for (;;) {
+        const auto page = poll(fixture.m_observer, fixture.m_nonce, cursor);
+        require(page.has_value(), "capacity refusal cannot fail the root observation channel");
+        if (first_agent.empty() && !page->observations.empty()) first_agent = page->observations.front().agent_id;
+        admitted += page->observations.size();
+        cursor = page->resume_cursor;
+        if (!page->more) break;
+    }
+    require(admitted == 128, "native hook admission respects the host's active-child bound");
+    fixture.metadata("child-0", "completed", 0, "2026-11-15T12:00:01.000Z");
+    Observe_window window(fixture);
+    const auto completed = fixture.await_page(1, cursor);
+    require(completed.observations.front().agent_id == first_agent &&
+        completed.observations.front().subagent_transition == addon::Subagent_transition::STOPPED,
+        "saturation preserves valid terminal evidence for an already admitted child");
+    fixture.m_observer.classify(fixture.hook("SubagentStart", "replacement"));
+    const auto replacement = fixture.await_page(1, completed.resume_cursor);
+    require(replacement.observations.front().subagent_transition == addon::Subagent_transition::STARTED,
+        "a released slot admits another authenticated native execution");
+    fixture.m_observer.classify(fixture.hook("SessionEnd"));
+    require(fixture.await_page(1, replacement.resume_cursor).observations.front().session_transition ==
+        addon::Session_transition::ENDED, "capacity refusal cannot suppress root END");
+}
+
 void invalid_metadata_does_not_fabricate_completion()
 {
     Fixture fixture;
@@ -632,6 +665,7 @@ int main()
         directory_replacement_and_native_unicode_names();
         terminal_page_and_retirement();
         cancellation_and_cursor_isolation();
+        capacity_refuses_only_new_child_admissions();
         watch_continuation_is_independent_of_consumption();
         return 0;
     }

@@ -41,6 +41,7 @@ else()
 endif()
 
 include(cmake/qwen_observation_dependency.cmake)
+logonomic_cli_addon_add_filesystem_observer()
 
 function(qwen_target target)
     target_link_libraries(${target} PRIVATE logonomic_cli_addon_sdk::sdk)
@@ -66,7 +67,7 @@ add_library(qwen_provider STATIC
 qwen_target(qwen_provider)
 target_include_directories(qwen_provider PUBLIC src)
 target_link_libraries(qwen_provider PUBLIC logonomic_cli_addon_sdk::sdk
-    vnm_framework::vnm_filesystem_observation)
+    logonomic_cli_addon_sdk::filesystem_observer)
 
 add_executable(qwen_adapter src/adapter.cpp)
 target_link_libraries(qwen_adapter PRIVATE qwen_provider)
@@ -78,18 +79,27 @@ logonomic_cli_addon_add_launch_bridge(qwen_launch_bridge)
 qwen_target(qwen_launch_bridge)
 
 logonomic_cli_addon_package_platform(QWEN_PLATFORM)
-logonomic_cli_addon_package_directory(logonomic.cli.qwen QWEN_PACKAGE_DIRECTORY)
 configure_file(package/logonomic-cli-addon.json.in generated/logonomic-cli-addon.json @ONLY)
-logonomic_cli_addon_package_indexer(qwen_package_indexer qwen_index_dependencies)
-include(cmake/qwen_package_runtime.cmake)
-# Runtime bytes can change without relinking the provider. The assembler checks
-# exact inputs and preserves a complete unchanged package on a no-op build.
-add_custom_target(qwen_package ALL
-    COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/assemble-package-$<CONFIG>.cmake"
-    BYPRODUCTS "${QWEN_PACKAGE_DIRECTORY}/package.files.json"
-    DEPENDS qwen_adapter qwen_helper qwen_launch_bridge logonomic_cli_addon_index
-    VERBATIM)
-logonomic_cli_addon_install_package("${QWEN_PACKAGE_DIRECTORY}" logonomic.cli.qwen TARGET qwen_package)
+set(QWEN_QTBASE_SOURCE "" CACHE PATH "qtbase source matching the selected Qt runtime (notices)")
+set(QWEN_RUNTIME_NOTICES_DIRECTORY "" CACHE PATH
+    "Copyright/license files for external runtimes, named <library filename>.txt")
+set(QWEN_LINUX_RUNTIME_MATERIAL "" CACHE FILEPATH
+    "Exact prebuilt input provenance from the selected Qt/runtime acquisition")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_program(QWEN_PATCHELF_EXECUTABLE patchelf REQUIRED)
+endif()
+logonomic_cli_addon_add_qt_package(qwen_package logonomic.cli.qwen QWEN_PACKAGE_DIRECTORY
+    ADAPTER qwen_adapter
+    HELPERS qwen_helper qwen_launch_bridge
+    QTBASE_SOURCE "${QWEN_QTBASE_SOURCE}"
+    RUNTIME_NOTICES "${QWEN_RUNTIME_NOTICES_DIRECTORY}"
+    LINUX_RUNTIME_MATERIAL "${QWEN_LINUX_RUNTIME_MATERIAL}"
+    PATCHELF "${QWEN_PATCHELF_EXECUTABLE}"
+    OUT_RUNTIME_CHECK QWEN_RUNTIME_CHECK
+    OUT_QTBASE_SOURCE QWEN_QTBASE_SOURCE
+    INDEX_ARGUMENTS
+        --third-party assets/qwen_dark.svg notices/qwen-LICENSE.txt provenance/qwen_logo.json
+        --third-party assets/qwen_light.svg notices/qwen-LICENSE.txt provenance/qwen_logo.json)
 
 # Everything below is the package's own test suite, which only its standalone
 # build configures; an embedding build stages the package and stops here.
@@ -147,6 +157,7 @@ qwen_target(qwen_contract_tests)
 add_dependencies(qwen_contract_tests qwen_package)
 add_test(NAME qwen_contract_tests COMMAND qwen_contract_tests "${QWEN_PACKAGE_DIRECTORY}")
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+get_target_property(_qwen_sdk_source logonomic_cli_addon_sdk::sdk SOURCE_DIR)
 add_test(NAME qwen_helper_tests
     COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/qwen_helper_tests.py"
         "${QWEN_PACKAGE_DIRECTORY}" "$<TARGET_FILE:qwen_contract_tests>")
@@ -167,21 +178,14 @@ add_test(NAME qwen_package_validation COMMAND logonomic_cli_addon_validate "${QW
 add_test(NAME qwen_package_conformance COMMAND logonomic_cli_addon_conformance "${QWEN_PACKAGE_DIRECTORY}")
 set_tests_properties(qwen_contract_tests qwen_usage_tests qwen_usage_page_tests qwen_acp_tests qwen_package_validation qwen_package_conformance PROPERTIES TIMEOUT 120)
 add_test(NAME qwen_dependency_preparation_tests
-    COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/test_prepare_ci.py")
+    COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/test_prepare_ci.py"
+        --sdk "${_qwen_sdk_source}")
 add_test(NAME qwen_package_runtime_layout
     COMMAND "${CMAKE_COMMAND}" "-DPACKAGE=${QWEN_PACKAGE_DIRECTORY}"
         "-DEXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_runtime_layout_tests.cmake")
-if(MSVC OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    add_test(NAME qwen_package_runtime_closure
-        COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/check-runtime-closure-$<CONFIG>.cmake")
-    set_tests_properties(qwen_package_runtime_closure PROPERTIES TIMEOUT 120)
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    add_test(NAME qwen_package_runtime_closure
-        COMMAND "${Python3_EXECUTABLE}" -B "${QWEN_LINUX_RUNTIME_DEPLOYER}"
-            verify --package "${QWEN_PACKAGE_DIRECTORY}")
-    set_tests_properties(qwen_package_runtime_closure PROPERTIES TIMEOUT 120)
-endif()
+add_test(NAME qwen_package_runtime_closure COMMAND ${QWEN_RUNTIME_CHECK})
+set_tests_properties(qwen_package_runtime_closure PROPERTIES TIMEOUT 120)
 add_executable(qwen_usage_cache_tests tests/qwen_usage_cache_tests.cpp)
 target_link_libraries(qwen_usage_cache_tests PRIVATE
     qwen_provider logonomic_cli_addon_sdk::test_support)
