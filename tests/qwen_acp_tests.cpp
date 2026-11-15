@@ -5,6 +5,7 @@
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/package_source.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -508,10 +509,62 @@ void delayed_children_require_parent_synthesis()
         "native failure before the first synthesis segment lacks typed completion and cannot succeed");
     require(inspect(pending.protocol_state, background_response("Wrong turn.", true, false, "foreign-turn")).failure_reason ==
         "invalid_acp_background_turn", "synthesis completion belongs to the admitted native turn");
-    require(inspect(pending.protocol_state, background_start()).failure_reason == "unsupported_acp_reverse_request",
-        "a second admission cannot replace an unfinished native turn");
+    require(inspect(pending.protocol_state, background_start("session-alpha", "overlapping-turn")).failure_reason ==
+        "unsupported_acp_reverse_request", "a different admission cannot replace an unfinished native turn");
     require(inspect(prompt_state(), background_start("other-session")).failure_reason == "unsupported_acp_reverse_request",
         "automatic-turn admission is confined to the owned session");
+}
+
+void native_background_admission_retries_are_idempotent()
+{
+    // Qwen 0.27.4 times admission out after two seconds and requeues the same
+    // item.turn. Captured native retries changed the RPC id from 2 to 3 while
+    // retaining every admission parameter, including turnId and startedAt.
+    auto request = parse(background_start());
+    request.set("id", Json(2));
+    auto* params = request.find("params");
+    params->set("toolUseId", Json("agent-tool-call"));
+    params->set("sourceTurnId", Json("root-turn"));
+    params->set("label", Json("Delayed native fixture child"));
+    auto pending = inspect(prompt_state(), wire::message("Working. ") +
+        wire::active_work(1, "session-alpha", wire::one_hold()) + wire::prompt_response());
+    pending = inspect(pending.protocol_state, wire::record(request));
+    require(!pending.failure_reason && pending.stdin_bytes, "native retry fixture admits the first request");
+    request.set("id", Json(3));
+    auto retried = inspect(pending.protocol_state, wire::record(request));
+    require(!retried.failure_reason && retried.stdin_bytes && !retried.complete && !retried.close_stdin,
+        "an exact native background admission retry receives another reply without ending the session");
+    const auto reply = parse(*retried.stdin_bytes);
+    require(json_util::member(reply, "id").as_integer() == 3 &&
+        json_util::member(json_util::member(reply, "error"), "code").as_integer() == -32601,
+        "the retry reply uses its current RPC id and the documented no-host-policy outcome");
+    require_waiting(inspect(retried.protocol_state, wire::active_work(2)),
+        "an admission retry cannot replace typed synthesis completion with an empty heartbeat");
+
+    for (const auto field : {"taskId", "kind", "toolUseId", "sourceTurnId", "afterPromptId", "label"}) {
+        auto changed = request;
+        changed.find("params")->set(field, Json("changed-identity"));
+        require(inspect(pending.protocol_state, wire::record(changed)).failure_reason == "unsupported_acp_reverse_request",
+            "the same turn id with contradictory native admission metadata is refused");
+    }
+    auto changed_time = request;
+    changed_time.find("params")->set("startedAt", Json(std::int64_t{1730000000001}));
+    require(inspect(pending.protocol_state, wire::record(changed_time)).failure_reason == "unsupported_acp_reverse_request",
+        "the same turn id cannot change the native attempt start time");
+
+    retried = inspect(retried.protocol_state, background_response("Verified the result.", true));
+    require_waiting(retried, "typed synthesis still waits for its native end boundary");
+    request.set("id", Json("late-retry"));
+    auto& reordered = request.find("params")->as_object();
+    std::reverse(reordered.begin(), reordered.end());
+    retried = inspect(retried.protocol_state, wire::record(request));
+    require(!retried.failure_reason && retried.stdin_bytes && !retried.complete && !retried.close_stdin,
+        "retry identity is independent of JSON member order and preserves existing completion evidence");
+    retried = inspect(retried.protocol_state, background_end() + wire::active_work(3));
+    require_close(retried);
+    retried = inspect(retried.protocol_state, wire::close_response(), true);
+    require(!retried.failure_reason && retried.complete && retried.result_bytes == "Working. Verified the result.",
+        "an admission retry does not reset completion or duplicate parent synthesis");
 }
 
 void conditional_close_handles_races_and_invalid_responses()
@@ -675,6 +728,7 @@ int main()
     work_accounting_requires_complete_negotiated_coverage();
     only_fresh_ordered_root_snapshots_allow_close();
     delayed_children_require_parent_synthesis();
+    native_background_admission_retries_are_idempotent();
     conditional_close_handles_races_and_invalid_responses();
     native_prompt_metadata_is_advisory();
     failures_are_terminal_and_bounded();
