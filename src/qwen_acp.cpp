@@ -652,17 +652,17 @@ std::optional<const char*> observe_background_turn(const Json& value, Json& stat
     if (json_util::text(params, "source") == "background_notification") {
         if (method == "_qwencode/start_turn") {
             if (!background_turn_params(params, json_util::text(state, "session_id")) ||
-                !json_util::text(state, "background_turn_id").empty())
+                !json_util::text(json_util::member(state, "background_turn"), "turnId").empty())
             {
                 return "invalid_acp_background_turn";
             }
-            state.set("background_turn_id", json_util::member(params, "turnId"));
+            state.set("background_turn", params);
             state.set("background_turn_complete", Json(false));
         }
         else
         if (method == "_qwencode/end_turn") {
             if (!json_util::bounded_string(json_util::member(params, "turnId"), 1024) ||
-                json_util::text(params, "turnId") != json_util::text(state, "background_turn_id"))
+                json_util::text(params, "turnId") != json_util::text(json_util::member(state, "background_turn"), "turnId"))
             {
                 return "invalid_acp_background_turn";
             }
@@ -679,7 +679,7 @@ std::optional<const char*> observe_background_turn(const Json& value, Json& stat
             if (!json_util::member(state, "background_turn_complete").as_boolean()) {
                 return "acp_background_incomplete";
             }
-            state.set("background_turn_id", Json(""));
+            state.set("background_turn", Json::object());
             state.set("background_turn_complete", Json(false));
         }
     }
@@ -690,7 +690,7 @@ std::optional<const char*> observe_background_turn(const Json& value, Json& stat
     {
         const auto& task = json_util::member(meta, "backgroundTask");
         if (json_util::text(task, "turnId").empty() ||
-            json_util::text(task, "turnId") != json_util::text(state, "background_turn_id"))
+            json_util::text(task, "turnId") != json_util::text(json_util::member(state, "background_turn"), "turnId"))
         {
             return "invalid_acp_background_turn";
         }
@@ -842,7 +842,7 @@ std::string initial_acp_state(std::string_view prompt, const std::vector<Task_se
         {"deferred_input_base64", Json("")},
         {"prompt_base64", Json(addon::encode_base64(prompt))}, {"session_id", Json("")},
         {"result_base64", Json("")}, {"receipts", std::move(expected)}, {"task_tools", std::move(tools)},
-        {"active_work", encode_active_work({})}, {"background_turn_id", Json("")},
+        {"active_work", encode_active_work({})}, {"background_turn", Json::object()},
         {"background_turn_complete", Json(false)}});
     if (selection) {
         state.set("model_selection", addon::encode_delegated_model_selection(*selection));
@@ -857,12 +857,19 @@ addon::Structured_inspect_result inspect_acp(
     const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
     auto parsed = addon::parse_exchange_protocol_state(inspection.protocol_state);
     if (!parsed || !json_util::only_keys(*parsed, {"stage", "pending_base64", "deferred_input_base64", "prompt_base64", "session_id",
-            "result_base64", "receipts", "task_tools", "model_selection", "native_model", "active_work", "background_turn_id",
+            "result_base64", "receipts", "task_tools", "model_selection", "native_model", "active_work", "background_turn",
             "background_turn_complete"}) ||
         !json_util::member(*parsed, "stage").is_string() || !json_util::bounded_string(json_util::member(*parsed, "session_id"), 512, true) ||
-        !json_util::bounded_string(json_util::member(*parsed, "background_turn_id"), 1024, true) ||
+        !json_util::member(*parsed, "background_turn").is_object() ||
         !json_util::member(*parsed, "background_turn_complete").is_boolean() ||
         !valid_receipts(json_util::member(*parsed, "receipts"))) {
+        return failure("malformed_acp_state");
+    }
+    const auto& saved_turn = json_util::member(*parsed, "background_turn");
+    if (saved_turn.as_object().empty()
+            ? json_util::member(*parsed, "background_turn_complete").as_boolean()
+            : !background_turn_params(saved_turn, json_util::text(*parsed, "session_id")))
+    {
         return failure("malformed_acp_state");
     }
     auto active_work = decode_active_work(json_util::member(*parsed, "active_work"));
@@ -972,11 +979,22 @@ addon::Structured_inspect_result inspect_acp(
                 }
                 else if (mid_turn_queue_request(*value, session)) replies += method_not_found(json_util::member(*value, "id"));
                 else
-                if (background_turn_request(*value, session) && json_util::text(state, "background_turn_id").empty()) {
-                    state.set("background_turn_id", json_util::member(json_util::member(*value, "params"), "turnId"));
-                    state.set("background_turn_complete", Json(false));
-                    // Qwen explicitly supports -32601 for clients without a
-                    // host-owned automatic-turn admission policy.
+                if (background_turn_request(*value, session)) {
+                    const auto& params = json_util::member(*value, "params");
+                    const auto& admitted = json_util::member(state, "background_turn");
+                    if (!admitted.as_object().empty() &&
+                        addon::serialize_json_canonical(params) != addon::serialize_json_canonical(admitted))
+                    {
+                        return failure("unsupported_acp_reverse_request");
+                    }
+                    if (admitted.as_object().empty()) {
+                        state.set("background_turn", params);
+                        state.set("background_turn_complete", Json(false));
+                    }
+                    // Qwen retries the same retained turn when admission times
+                    // out. Reply to the current RPC id without resetting any
+                    // completion evidence. -32601 is its documented response
+                    // for clients without a host-owned admission policy.
                     replies += method_not_found(json_util::member(*value, "id"));
                 }
                 else {
@@ -1069,7 +1087,7 @@ addon::Structured_inspect_result inspect_acp(
                 return failure("invalid_acp_close");
             }
             if (json_util::member(result, "closed").as_boolean()) {
-                if (result.find("holds") || !json_util::text(state, "background_turn_id").empty()) {
+                if (result.find("holds") || !json_util::text(json_util::member(state, "background_turn"), "turnId").empty()) {
                     return failure("invalid_acp_close");
                 }
                 if (output->empty()) {
@@ -1107,7 +1125,7 @@ addon::Structured_inspect_result inspect_acp(
     }
     if (inspection.final) return failure(inspection.timed_out ? "acp_timeout" : "acp_incomplete");
     if (json_util::text(state, "stage") == "await_active_work" && remaining.empty() &&
-        json_util::text(state, "background_turn_id").empty() &&
+        json_util::text(json_util::member(state, "background_turn"), "turnId").empty() &&
         active_work_is_fresh(*active_work, now_ms) && !active_work->held)
     {
         if (active_work->close_request_id == k_max_rpc_id) {
