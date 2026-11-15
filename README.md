@@ -2,8 +2,9 @@
 
 [![CI](https://github.com/Varinomics/vnm_logonomic_cli_qwen/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/Varinomics/vnm_logonomic_cli_qwen/actions/workflows/ci.yml)
 
-Standalone C++20 add-on for Qwen Code on Windows/Linux x86-64 and macOS ARM64. It consumes
-only the public Logonomic CLI add-on SDK. Qwen Code is installed separately;
+Standalone C++20 add-on for Qwen Code on Windows/Linux x86-64 and macOS ARM64. It uses
+the public Logonomic CLI add-on SDK and the owned filesystem observation service,
+with QtCore for native child observation. Qwen Code is installed separately;
 this package does not install a CLI, log in, copy credentials, or call a paid API.
 
 The integration uses Qwen's native command hooks, exact UUID session resume,
@@ -63,8 +64,24 @@ Interactive hooks deliver host-admitted title and coordination instructions as
 Qwen `hookSpecificOutput.additionalContext`. Prompt submission and Stop provide inferred phase
 evidence; Stop does not prove success because another native hook can resume
 the turn. StopFailure confirms failure of an identified root turn. Permission
-notifications provide unpaired inferred attention. Child lifecycle tracking is
-not advertised: Qwen's child stop hook runs before its blockable completion gate.
+notifications provide unpaired inferred attention.
+
+Native `SubagentStart` hooks enroll children under the authenticated current root
+activation. The adapter observes those children's exact metadata files through
+the owned filesystem observation service. Only persisted `completed`, `failed`,
+`cancelled`, or `paused` state closes an admitted child attempt; `SubagentStop`
+alone does not, because that hook precedes Qwen's blockable completion gate.
+Repeated helper delivery is idempotent, and a resumed child receives a distinct
+attempt identity. An unchanged terminal sidecar from an earlier attempt cannot
+prove that the newly started attempt has finished.
+
+Observation requires the root hook's native transcript location. It does not
+discover children by scanning other projects or replaying stored history, and
+stored metadata alone cannot establish ownership between two native processes
+that write the same root session. Missing or unavailable evidence does not turn
+into a successful child completion. Child tracking uses Logonomic's existing
+flat lifecycle under the root, and native children retain the root's coordination
+principal. Qwen's native agent configuration determines their tools and permissions.
 
 In a live terminal, native root `SessionStart` hooks select the conversation after
 `/clear` or a successful `/resume`. Logonomic retains the departed conversation in
@@ -191,13 +208,34 @@ PowerShell; arguments that cannot safely survive a `.cmd` expansion are refused.
 
 ## Building and qualification
 
-The owned SDK source dependency tracks `master`. A local source override is
-available as `LOGONOMIC_CLI_ADDON_SDK_SOURCE`, pointing at
-`sdk/logonomic_cli_addon_sdk`. Build `qwen_package` in a separate build tree;
+The owned SDK and filesystem observation source dependencies track `master`.
+A local SDK override is available as `LOGONOMIC_CLI_ADDON_SDK_SOURCE`, pointing
+at `sdk/logonomic_cli_addon_sdk`. `QWEN_FRAMEWORK_SOURCE` selects a local
+`vnm_framework` checkout; the observer reuses an embedding build's existing
+`vnm_framework::vnm_filesystem_observation` target when available. The leaf
+requires Qt 6.12 or later, Core only, and the owned `vnm_qt_dispatch` dependency.
+Build `qwen_package` in a separate build tree;
 its indexed output is `package/logonomic.cli.qwen` below a single-configuration
 build tree, or `package/<config>/logonomic.cli.qwen` with a multi-configuration
-generator. Windows
-compiler-invoking commands must use the user-wide queued-build policy.
+generator. Compiler-invoking commands must use the applicable queued-build
+policy. The provider CI's preparation callback acquires the selected platform's
+Qt kit, matching notices, and current owned sources before configuration.
+
+The package retains `adapter/qwen_adapter` and `helpers/qwen_helper` and
+`helpers/qwen_launch_bridge` (with `.exe` on Windows). The producer resolves and
+indexes their complete non-system runtime closure. Windows copies required DLLs
+beside each executable directory; Linux shares the adapter directory's libraries
+through package-relative loader paths; macOS uses the SDK's native deployment
+and signing helpers. A runnable build-tree adapter does not establish that its
+package is deployable.
+
+`QWEN_QTBASE_SOURCE` supplies the selected Qt version's source for license
+material. `QWEN_RUNTIME_NOTICES_DIRECTORY` supplies external-runtime notices when
+the host does not provide them. Linux additionally requires exact source-package
+provenance: `QWEN_LINUX_RUNTIME_MATERIAL` supplies the SDK deployer's verified
+prebuilt input record for Qt, ICU, or other acquired runtimes. Missing provenance
+fails package assembly. These inputs do not relax integrity or loader-closure
+checks.
 
 The package recipe proves the Windows/Linux x86-64 or macOS ARM64 compiler target
 during configuration. `cmake --install` exports a fresh artifact beneath its install-time
@@ -209,7 +247,7 @@ manually remove only that identified disposable export before retrying; never
 remove an installed generation this way. The application's package ingestion
 owns atomic installation and updates.
 
-The package includes focused contract, usage, ACP and native peer fixtures,
+The package includes focused contract, lifecycle observer, usage, ACP and native peer fixtures,
 SDK package validation and package conformance registrations. The native peer
 fixture uses isolated Linux sockets and profiles. For interoperability against
 an installed `@qwen-code/sdk/peer`, run `node tests/qwen_peer_sdk_tests.mjs
@@ -226,6 +264,13 @@ not an upstream compatibility pin. Primary contracts are in
 `packages/cli/src/config/{config,environment,settings,shared-env-keys}.ts`,
 `packages/core/src/config/storage.ts`, the native ACP implementation, and
 `packages/core/src/services/{chatRecordingService,usageHistoryService}.ts`.
+
+Native child lifecycle observation also follows Qwen Code
+[`f35dde84157f992bc324c0a3f59b1119344a683d`](https://github.com/QwenLM/qwen-code/tree/f35dde84157f992bc324c0a3f59b1119344a683d):
+`packages/core/src/agents/agent-transcript.ts`, `background-agent-resume.ts`,
+`packages/core/src/tools/agent/agent.ts`, and `packages/core/src/hooks/hookEventHandler.ts`.
+The hook identity and durable metadata schema govern admission; this provenance
+does not impose an upper CLI version limit.
 
 The peer integration follows the public
 [`cross-session-protocol.md`](https://github.com/QwenLM/qwen-code/blob/6212189f1f8334da78a69e3fb6b63ff6ca88251e/docs/users/features/cross-session-protocol.md)

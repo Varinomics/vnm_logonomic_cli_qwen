@@ -8,6 +8,7 @@
 #include <logonomic_cli_addon/host_simulator.h>
 #include <logonomic_cli_addon/ids.h>
 #include <logonomic_cli_addon/lifecycle_events.h>
+#include <logonomic_cli_addon/lifecycle_correlation_lifetime.h>
 #include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/managed_configuration.h>
 #include <logonomic_cli_addon/package_source.h>
@@ -409,6 +410,13 @@ bool settings_contract()
     const auto& stop = json_util::member(json_util::member(parsed, "hooks"), "Stop");
     ok &= check(stop.is_array() && stop.as_array().size() == 2,
         "existing Stop command and managed command coexist");
+    for (const auto* event : {"SubagentStart", "SubagentStop"}) {
+        const auto& entries = json_util::member(json_util::member(parsed, "hooks"), event);
+        ok &= check(entries.is_array() && entries.as_array().size() == 1 &&
+            addon::serialize_json_canonical(entries.as_array().front()) ==
+                addon::serialize_json_canonical(qwen::hook_entry(event)),
+            "native child hooks use the same authenticated helper installation");
+    }
     ok &= check(qwen::updated_config(configured) == configured, "hook installation is idempotent");
     ok &= check(configured.find("/* before */") != std::string::npos &&
         configured.find("/* after */") != std::string::npos, "hook-array comments survive");
@@ -537,6 +545,9 @@ bool declared_profile_admits_every_shape(const std::filesystem::path& package)
     const auto sidecar = bytes ? addon::parse_sidecar(*bytes, nullptr) : std::nullopt;
     const auto declaration = sidecar ? addon::decode_lifecycle_declaration(sidecar->payload, nullptr) : std::nullopt;
     if (!check(declaration.has_value(), "package lifecycle declaration is readable")) return false;
+    if (!check(declaration->observation == addon::Observation_mode::CONTINUOUS &&
+            declaration->features.subagents == addon::Feature_support::SUPPORTED,
+            "package advertises continuous native child observation")) return false;
     addon::Attention_classification_request request;
     request.base.ledger.current_epoch = 1;
     request.base.ledger.current_transition = addon::Ledger_transition{
@@ -869,7 +880,21 @@ bool execution_context_contract(const std::filesystem::path& package, const std:
     bool ok = check(std::find(live.begin(), live.end(), addon::Capability_pair{
             addon::k_execution_context_capability_id, addon::k_execution_context_version}) != live.end(),
         "the packaged declaration and adapter handshake negotiate execution-context@1");
+    ok &= check(std::find(live.begin(), live.end(), addon::Capability_pair{
+            "lifecycle-correlation-lifetime", 1}) != live.end(),
+        "the packaged observer negotiates host-owned correlation lifetime");
     const auto invoke = [&](const addon::Json_value& payload) {
+        // The negotiated lifetime contract requires host reservation before a
+        // provisional root transition reaches the persistent observer.
+        if (json_util::text(json_util::member(payload, "event"), "name") == "SessionStart") {
+            const addon::Lifecycle_correlation_reserve_request reserve{{json_util::text(payload, "transition_nonce")}};
+            const auto id = host.invoke({"lifecycle-correlation-lifetime", 1}, "reserve",
+                addon::encode_lifecycle_correlation_reserve_request(reserve), 15000);
+            const auto outcome = host.wait_outcome(id, 18000);
+            if (!outcome || outcome->status != addon::Host_status::SUCCESS) {
+                throw std::runtime_error("packaged observer correlation reservation failed");
+            }
+        }
         const auto id = host.invoke({"helper-ingress", 2}, addon::k_classify_event_operation, payload, 15000);
         const auto outcome = host.wait_outcome(id, 18000);
         addon::Contract_failure failure;
@@ -983,9 +1008,19 @@ bool execution_context_contract(const std::filesystem::path& package, const std:
         "a delayed clear-end remains inert after the same native identity is active again");
     delayed.event.body.set("reason", qwen::Json("prompt_input_exit"));
     result = invoke(addon::encode_classify_event_request(delayed));
-    ok &= check(result.observations.size() == 1 &&
-            result.observations.front().session_transition == addon::Session_transition::ENDED,
-        "an actual exit still ends the matching native conversation");
+    ok &= check(result.classification == addon::Classification::IGNORED && result.observations.empty(),
+        "an actual exit waits behind already admitted child observations");
+    addon::Poll_observations_request poll;
+    poll.limit = 1;
+    poll.correlation = addon::Session_correlation{std::string(32, 'c')};
+    const auto poll_id = host.invoke({"lifecycle-events", 2}, "poll_observations",
+        addon::encode_poll_observations_request(poll), 15000);
+    const auto poll_outcome = host.wait_outcome(poll_id, 18000);
+    const auto terminal = poll_outcome && poll_outcome->status == addon::Host_status::SUCCESS
+        ? addon::decode_poll_observations_result(poll_outcome->payload, poll.limit, &failure) : std::nullopt;
+    ok &= check(terminal && terminal->observations.size() == 1 && !terminal->more &&
+            terminal->observations.front().session_transition == addon::Session_transition::ENDED,
+        "the continuous stream retains the native root exit for host consumption");
     current.event.name = "PostToolUse";
     current.event.body.set("cwd", qwen::Json(addon::path_to_utf8(root / "command override")));
     result = invoke(addon::encode_classify_event_request(current));

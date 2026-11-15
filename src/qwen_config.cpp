@@ -13,7 +13,7 @@ namespace {
 
 constexpr const char* k_events[] = {
     "SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "StopFailure",
-    "Notification",
+    "Notification", "SubagentStart", "SubagentStop",
 };
 
 struct value_span_t

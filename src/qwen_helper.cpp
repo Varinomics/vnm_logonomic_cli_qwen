@@ -70,14 +70,15 @@ int main()
     }
     const auto event = json_util::text(*input, "hook_event_name");
     if (event != "SessionStart" && event != "SessionEnd" && event != "UserPromptSubmit" &&
-        event != "Stop" && event != "StopFailure" && event != "Notification")
+        event != "Stop" && event != "StopFailure" && event != "Notification" &&
+        event != "SubagentStart" && event != "SubagentStop")
     {
         return 0;
     }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(21);
     addon::Helper_client client(*environment, [&] { return std::chrono::steady_clock::now() >= deadline; });
     auto body = qwen::Json::object();
-    for (const auto* key : {"session_id", "prompt_id", "agent_id", "source", "reason", "notification_type",
+    for (const auto* key : {"session_id", "prompt_id", "agent_id", "agent_type", "source", "reason", "notification_type",
             "cwd", "transcript_path"})
     {
         const auto value = json_util::text(*input, key);

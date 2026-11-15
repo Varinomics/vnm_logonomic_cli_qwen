@@ -6,6 +6,7 @@
 #include "qwen_launcher.h"
 #include "qwen_launcher_approval.h"
 #include "qwen_lifecycle.h"
+#include "qwen_observer.h"
 #include "qwen_preparation.h"
 #include "qwen_resume.h"
 #include "qwen_session_wake.h"
@@ -18,6 +19,7 @@
 #include <logonomic_cli_addon/session_contracts.h>
 
 #include <exception>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -79,7 +81,7 @@ void transform(addon::Invocation_context& context)
     context.succeed(addon::encode_managed_configuration_transform_result({request->grant, content}));
 }
 
-void invoke(addon::Invocation_context& context)
+void invoke(addon::Invocation_context& context, qwen::Lifecycle_observer& observer)
 {
     try {
         if (context.cancel_requested()) {
@@ -140,24 +142,10 @@ void invoke(addon::Invocation_context& context)
             context.succeed(addon::encode_resume_inspect_result(result, request.capability.version));
         }
         else
-        if (capability == addon::k_attention_kind_capability_id && request.operation == addon::k_classify_event_operation) {
-            addon::Contract_failure failure;
-            const auto decoded = addon::decode_attention_classification_request(request.payload, &failure);
-            if (!decoded) {
-                context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
-                return;
-            }
-            context.succeed(addon::encode_attention_classification_result(qwen::classify_attention(*decoded)));
-        }
-        else
-        if (capability == "helper-ingress" && request.operation == addon::k_classify_event_operation) {
-            addon::Contract_failure failure;
-            const auto decoded = addon::decode_classify_event_request(request.payload, &failure);
-            if (!decoded) {
-                context.fail(addon::Result_status::FAILED, failure.reason_code, failure.detail);
-                return;
-            }
-            context.succeed(addon::encode_classify_event_result(qwen::classify_event(*decoded)));
+        if (capability == "lifecycle-events" || capability == "helper-ingress" ||
+            capability == addon::k_attention_kind_capability_id || capability == "lifecycle-correlation-lifetime")
+        {
+            observer.handle(context);
         }
         else
         if (capability == "structured-session" && request.operation == "inspect") {
@@ -204,6 +192,7 @@ int main()
         {"launch-preparation", 3}, {"managed-configuration", 2}, {"helper-ingress", 2},
         {addon::k_interactive_initial_prompt_capability_id, addon::k_interactive_initial_prompt_version},
         {"lifecycle-events", 2}, {"coordination-delivery", 1},
+        {"lifecycle-correlation-lifetime", 1},
         {addon::k_context_state_capability_id, addon::k_context_state_capability_version},
         {addon::k_execution_context_capability_id, addon::k_execution_context_version},
         {"session-wake", 1},
@@ -214,7 +203,9 @@ int main()
         {addon::k_delegated_model_selection_capability_id, addon::k_delegated_model_selection_version},
         {"interactive-resume", 2}, {"interactive-resume", 3}, {"interactive-resume", 4},
     };
+    const auto observation_service = std::make_shared<vnm::filesystem_observation::Service>();
+    qwen::Lifecycle_observer observer(observation_service, {});
     addon::Adapter_runtime runtime(std::move(options));
-    runtime.set_invoke_handler(invoke);
+    runtime.set_invoke_handler([&](auto& context) { invoke(context, observer); });
     return runtime.run();
 }

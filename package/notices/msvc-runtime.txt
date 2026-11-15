@@ -1,0 +1,9 @@
+Microsoft Visual C++ Runtime
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+These runtime DLLs are copied from the redistributable directory of the Microsoft
+Visual C++ toolchain selected for this build. They are distributed as part of this
+application under the Visual Studio distributable-code terms:
+https://aka.ms/vs/18/redistribution
+
+The resolved filenames and source locations are recorded in provenance/runtime.txt.

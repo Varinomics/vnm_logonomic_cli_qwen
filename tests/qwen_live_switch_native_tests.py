@@ -195,18 +195,29 @@ def run_native(args, root):
         invocation_count += 1
         script = root / f"invoke-{invocation_count}.json"
         transcript = root / f"invoke-{invocation_count}.txt"
-        script.write_text(json.dumps({"script_version": 1, "steps": [
+        steps = []
+        if operation == "classify_event" and payload.get("event", {}).get("name") == "SessionStart":
+            steps.extend([
+                {"op": "invoke", "id": "reserve", "capability_id": "lifecycle-correlation-lifetime",
+                 "version": 1, "operation": "reserve", "deadline_ms": 5000,
+                 "payload": {"transition_nonce": payload["transition_nonce"]}},
+                {"op": "wait_result", "id": "reserve", "timeout_ms": 8000},
+            ])
+        steps.extend([
             {"op": "invoke", "id": "request", "capability_id": capability, "version": version,
              "operation": operation, "payload": payload, "deadline_ms": 5000},
             {"op": "wait_result", "id": "request", "timeout_ms": 8000},
-            {"op": "shutdown", "grace_ms": 3000}]}))
+            {"op": "shutdown", "grace_ms": 3000}])
+        script.write_text(json.dumps({"script_version": 1, "steps": steps}))
         subprocess.run([str(args.simulator), str(args.package), "--script", str(script),
                         "--transcript", str(transcript), "--platform", "linux-x86_64"],
                        capture_output=True, text=True, timeout=15, check=True)
         frames = [json.loads(line[2:]) for line in transcript.read_text().splitlines() if line.startswith("< ")]
         results = [frame for frame in frames if frame.get("type") == "result"]
-        require(len(results) == 1 and results[0]["status"] == "success", "packaged operation failed: " + str(results))
-        return results[0]["payload"]
+        expected = sum(step["op"] == "invoke" for step in steps)
+        require(len(results) == expected and all(result["status"] == "success" for result in results),
+                "packaged operation failed: " + str(results))
+        return results[-1]["payload"]
 
     def classify(delivery, transition=True):
         result = invoke("helper-ingress", 2, "classify_event", {

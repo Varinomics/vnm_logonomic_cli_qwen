@@ -40,6 +40,8 @@ else()
     endif()
 endif()
 
+include(cmake/qwen_observation_dependency.cmake)
+
 function(qwen_target target)
     target_link_libraries(${target} PRIVATE logonomic_cli_addon_sdk::sdk)
     # The Windows API selection belongs to the platform, so a MinGW build gets
@@ -59,11 +61,12 @@ add_library(qwen_provider STATIC
     src/qwen_conversation.cpp src/qwen_resume.cpp
     src/qwen_accounts.cpp src/qwen_usage.cpp src/qwen_profile.cpp
     src/qwen_acp.cpp src/qwen_config.cpp src/qwen_launcher.cpp src/qwen_launcher_approval.cpp
-    src/qwen_lifecycle.cpp src/qwen_preparation.cpp
+    src/qwen_lifecycle.cpp src/qwen_observer.cpp src/qwen_preparation.cpp
     src/qwen_peer.cpp src/qwen_session_wake.cpp)
 qwen_target(qwen_provider)
 target_include_directories(qwen_provider PUBLIC src)
-target_link_libraries(qwen_provider PUBLIC logonomic_cli_addon_sdk::sdk)
+target_link_libraries(qwen_provider PUBLIC logonomic_cli_addon_sdk::sdk
+    vnm_framework::vnm_filesystem_observation)
 
 add_executable(qwen_adapter src/adapter.cpp)
 target_link_libraries(qwen_adapter PRIVATE qwen_provider)
@@ -75,15 +78,18 @@ logonomic_cli_addon_add_launch_bridge(qwen_launch_bridge)
 qwen_target(qwen_launch_bridge)
 
 logonomic_cli_addon_package_platform(QWEN_PLATFORM)
+logonomic_cli_addon_package_directory(logonomic.cli.qwen QWEN_PACKAGE_DIRECTORY)
 configure_file(package/logonomic-cli-addon.json.in generated/logonomic-cli-addon.json @ONLY)
-logonomic_cli_addon_add_package(qwen_package logonomic.cli.qwen QWEN_PACKAGE_DIRECTORY
-    ADAPTER qwen_adapter
-    HELPERS qwen_helper qwen_launch_bridge
-    INDEX_ARGUMENTS
-        --third-party "assets/qwen_dark.svg" "notices/qwen-LICENSE.txt"
-            "provenance/qwen_logo.json"
-        --third-party "assets/qwen_light.svg" "notices/qwen-LICENSE.txt"
-            "provenance/qwen_logo.json")
+logonomic_cli_addon_package_indexer(qwen_package_indexer qwen_index_dependencies)
+include(cmake/qwen_package_runtime.cmake)
+# Runtime bytes can change without relinking the provider. The assembler checks
+# exact inputs and preserves a complete unchanged package on a no-op build.
+add_custom_target(qwen_package ALL
+    COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/assemble-package-$<CONFIG>.cmake"
+    BYPRODUCTS "${QWEN_PACKAGE_DIRECTORY}/package.files.json"
+    DEPENDS qwen_adapter qwen_helper qwen_launch_bridge logonomic_cli_addon_index
+    VERBATIM)
+logonomic_cli_addon_install_package("${QWEN_PACKAGE_DIRECTORY}" logonomic.cli.qwen TARGET qwen_package)
 
 # Everything below is the package's own test suite, which only its standalone
 # build configures; an embedding build stages the package and stops here.
@@ -92,6 +98,11 @@ if(LOGONOMIC_CLI_ADDON_EMBEDDED)
 endif()
 
 enable_testing()
+add_executable(qwen_observer_tests tests/qwen_observer_tests.cpp)
+target_link_libraries(qwen_observer_tests PRIVATE qwen_provider logonomic_cli_addon_sdk::test_support)
+qwen_target(qwen_observer_tests)
+add_test(NAME qwen_observer_tests COMMAND qwen_observer_tests)
+set_tests_properties(qwen_observer_tests PROPERTIES TIMEOUT 120)
 add_executable(qwen_conversation_tests tests/qwen_conversation_tests.cpp)
 target_link_libraries(qwen_conversation_tests PRIVATE qwen_provider)
 qwen_target(qwen_conversation_tests)
@@ -155,6 +166,22 @@ add_test(NAME qwen_acp_tests COMMAND qwen_acp_tests)
 add_test(NAME qwen_package_validation COMMAND logonomic_cli_addon_validate "${QWEN_PACKAGE_DIRECTORY}" --platform "${QWEN_PLATFORM}")
 add_test(NAME qwen_package_conformance COMMAND logonomic_cli_addon_conformance "${QWEN_PACKAGE_DIRECTORY}")
 set_tests_properties(qwen_contract_tests qwen_usage_tests qwen_usage_page_tests qwen_acp_tests qwen_package_validation qwen_package_conformance PROPERTIES TIMEOUT 120)
+add_test(NAME qwen_dependency_preparation_tests
+    COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/.github/scripts/test_prepare_ci.py")
+add_test(NAME qwen_package_runtime_layout
+    COMMAND "${CMAKE_COMMAND}" "-DPACKAGE=${QWEN_PACKAGE_DIRECTORY}"
+        "-DEXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_runtime_layout_tests.cmake")
+if(MSVC OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    add_test(NAME qwen_package_runtime_closure
+        COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/check-runtime-closure-$<CONFIG>.cmake")
+    set_tests_properties(qwen_package_runtime_closure PROPERTIES TIMEOUT 120)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME qwen_package_runtime_closure
+        COMMAND "${Python3_EXECUTABLE}" -B "${QWEN_LINUX_RUNTIME_DEPLOYER}"
+            verify --package "${QWEN_PACKAGE_DIRECTORY}")
+    set_tests_properties(qwen_package_runtime_closure PROPERTIES TIMEOUT 120)
+endif()
 add_executable(qwen_usage_cache_tests tests/qwen_usage_cache_tests.cpp)
 target_link_libraries(qwen_usage_cache_tests PRIVATE
     qwen_provider logonomic_cli_addon_sdk::test_support)
@@ -185,8 +212,17 @@ if(LOGONOMIC_CLI_ADDON_RECIPE_TESTS)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     get_target_property(_membership_sdk_source logonomic_cli_addon_sdk::sdk SOURCE_DIR)
     add_test(NAME qwen_package_membership
-        COMMAND "${Python3_EXECUTABLE}" "${_membership_sdk_source}/cmake/package_membership_tests.py"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_membership_tests.py"
             "--source=${CMAKE_CURRENT_SOURCE_DIR}" "--sdk=${_membership_sdk_source}"
+            "--framework-source=${qwen_framework_source}"
+            "--dispatch-source=${qwen_dispatch_source}"
+            "--vnm-cmake-source=${qwen_vnm_cmake_source}"
+            "--observation-prefix=${vnm_filesystem_observation_DIR}"
+            "--dispatch-prefix=${vnm_qt_dispatch_DIR}"
+            "--qtbase-source=${QWEN_QTBASE_SOURCE}"
+            "--runtime-notices=${QWEN_RUNTIME_NOTICES_DIRECTORY}"
+            "--linux-runtime-material=${QWEN_LINUX_RUNTIME_MATERIAL}"
+            "--patchelf=${QWEN_PATCHELF_EXECUTABLE}"
             "--cmake=${CMAKE_COMMAND}" "--target=qwen_package" "--package-id=logonomic.cli.qwen"
             "--generator=${CMAKE_GENERATOR}" "--config=$<CONFIG>" "--build-type=${CMAKE_BUILD_TYPE}"
             "--generator-platform=${CMAKE_GENERATOR_PLATFORM}" "--toolset=${CMAKE_GENERATOR_TOOLSET}"
@@ -223,4 +259,12 @@ if(QWEN_NATIVE_TEST_COMMAND)
             "$<TARGET_FILE:qwen_contract_tests>" -- ${QWEN_NATIVE_TEST_COMMAND})
     set_tests_properties(qwen_live_switch_native_tests PROPERTIES
         TIMEOUT 180 SKIP_RETURN_CODE 77 LABELS "cli-addon;native-acceptance;live-switch")
+endif()
+
+if(WIN32)
+    # Tests execute build-tree programs before package deployment supplies their
+    # app-local DLLs. Use the selected kit for these executable paths only.
+    get_directory_property(_qwen_build_tree_tests TESTS)
+    set_tests_properties(${_qwen_build_tree_tests} PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
 endif()

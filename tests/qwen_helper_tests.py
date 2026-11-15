@@ -63,6 +63,34 @@ def main():
             assert len(deliveries[0]["transition_nonce"]) == 32
             assert body["profile_home"] == environment["QWEN_LOGONOMIC_PROFILE_HOME"]
 
+        # Native child hooks identify their owning root session and the child
+        # separately; both facts must reach authenticated provider ingress.
+        for event_name in ("SubagentStart", "SubagentStop"):
+            capture = root / f"{event_name}.jsonl"
+            environment["QWEN_TEST_HELPER_CAPTURE"] = str(capture)
+            native = {
+                "hook_event_name": event_name,
+                "session_id": session,
+                "agent_id": "code-reviewer-a1b2",
+                "agent_type": "code-reviewer",
+                "cwd": cwd,
+                "transcript_path": transcript,
+            }
+            completed = subprocess.run(
+                [str(helper)], input=json.dumps(native), text=True, capture_output=True,
+                env=environment, cwd=root, timeout=30, check=True,
+            )
+            assert not completed.stdout, "child hooks must not request root title instructions"
+            assert capture.exists(), "native child hooks must reach authenticated provider ingress"
+            deliveries = [json.loads(line) for line in capture.read_text(encoding="utf-8").splitlines()]
+            assert len(deliveries) == 2 and deliveries[0] == deliveries[1]
+            event = deliveries[0]["event"]
+            assert event["name"] == event_name
+            for key in ("session_id", "agent_id", "agent_type", "cwd", "transcript_path"):
+                assert event["body"][key] == native[key], f"native child {key} evidence changed"
+            assert event["body"]["event_id"] == deliveries[0]["idempotency_key"]
+            assert len(deliveries[0]["transition_nonce"]) == 32
+
         capture = root / "missing-directory.jsonl"
         environment["QWEN_TEST_HELPER_CAPTURE"] = str(capture)
         subprocess.run(

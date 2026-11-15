@@ -9,7 +9,8 @@
 int main()
 {
     logonomic::cli_addon::test::Sentinel_exception_context context;
-    invoke(context);
+    qwen::Lifecycle_observer observer;
+    invoke(context, observer);
     if (context.m_status != addon::Result_status::FAILED ||
         context.m_reason != "qwen_operation_failed" ||
         context.m_message.find("private-exception-sentinel") != std::string::npos)

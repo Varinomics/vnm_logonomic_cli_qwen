@@ -3,7 +3,7 @@
   "capability_id": "lifecycle-events",
   "payload": {
     "profile_id": "qwen-command-hooks",
-    "observation": "events",
+    "observation": "continuous",
     "features": {
       "attention": "supported",
       "cooperative_description": "unsupported",
@@ -12,7 +12,7 @@
       "root_turn_completion": "supported",
       "root_turn_start": "supported",
       "confirmed_phase_status": "supported",
-      "subagents": "unsupported"
+      "subagents": "supported"
     },
     "turn_origin_correlation": "unsupported"
   }
