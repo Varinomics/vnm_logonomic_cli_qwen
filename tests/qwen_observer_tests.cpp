@@ -14,7 +14,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -24,6 +23,7 @@
 #include <source_location>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -140,7 +140,10 @@ void write_bytes(const fs::path& path, const std::string& bytes)
     require(output.open(QIODevice::WriteOnly), "open native metadata fixture");
     require(output.write(bytes.data(), (qint64)bytes.size()) == (qint64)bytes.size(),
         "write complete native metadata fixture");
-    require(output.commit(), "atomically replace native metadata fixture");
+    if (!output.commit()) {
+        throw std::runtime_error("atomically replace native metadata fixture: " +
+            qwen::path_string(path) + ": " + output.errorString().toStdString());
+    }
 }
 
 observation::Configuration test_configuration()
@@ -633,31 +636,38 @@ void invalid_metadata_at_start_keeps_the_admitted_child()
         "metadata recovery finishes the child admitted while its record was unavailable");
 }
 
-void metadata_reads_allow_atomic_replacement()
+void metadata_snapshots_release_the_native_reader()
 {
-    // Oracle: native writeAgentMeta publishes through rename-over while an
-    // observer may still have the previous metadata generation open.
+    // Native writeAgentMeta publishes through rename-over. The production
+    // reader must close its handle before parsing or retaining snapshot bytes;
+    // Windows cannot replace an indefinitely open destination this way.
     Fixture fixture;
     const auto path = fixture.metadata_path("atomic-child");
     const std::string original = "original metadata generation";
     write_bytes(path, original);
-    auto input = qwen::detail::open_metadata_file(qwen::native_io_path(path));
-    require(input != nullptr, "open the production metadata reader");
+    const auto retained = qwen::detail::read_metadata_file(qwen::native_io_path(path), 1024);
+    require(retained == original, "read the original production metadata snapshot");
     write_bytes(path, "replacement metadata generation");
-    std::string retained(original.size() + 1, '\0');
-    retained.resize(std::fread(retained.data(), 1, retained.size(), input.get()));
-    require(!std::ferror(input.get()) && retained == original,
-        "native replacement succeeds while the observer finishes reading its original snapshot");
+    require(retained == original,
+        "native replacement preserves the observer's detached original snapshot");
+    require(qwen::detail::read_metadata_file(qwen::native_io_path(path), 1024) ==
+        "replacement metadata generation", "the next production read sees the replacement snapshot");
 }
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     try {
+        if (argc > 1) {
+            require(argc == 2 && std::string_view(argv[1]) == "metadata-snapshot",
+                "unknown observer test selector");
+            metadata_snapshots_release_the_native_reader();
+            return 0;
+        }
         invalid_metadata_does_not_fabricate_completion();
         invalid_metadata_at_start_keeps_the_admitted_child();
-        metadata_reads_allow_atomic_replacement();
+        metadata_snapshots_release_the_native_reader();
         stopped_hooks_do_not_end_active_children();
         fast_children_and_authenticated_inventory();
         resumes_do_not_reuse_stale_terminal_evidence();

@@ -91,6 +91,13 @@ not persist terminal metadata remain open until the root session ends. Set
 `run_in_background: true` when starting a top-level interactive fork to use Qwen's
 background path with persisted completion metadata.
 
+Qwen publishes metadata on a best-effort basis. On Windows, rename-over can fail
+while a reader has the preceding file open. The adapter closes its read handle
+before parsing the bounded snapshot, but a publication concurrent with the read
+can still fail. Qwen's task result and transcript remain available; without a
+persisted terminal state, the child stays open until later native evidence or
+the root session ends.
+
 The shared driver retains correlation reservations, independent watch and poll
 cursors, and filesystem subscriptions. It refuses new child admissions locally
 at the host's 128-active-child bound or when its bounded queue cannot reserve
@@ -98,12 +105,16 @@ their terminal facts. Already admitted child stops and root SessionEnd retain
 their queue space; capacity refusal does not disable root lifecycle tracking.
 
 Observation requires the root hook's native transcript location. It does not
-discover children by scanning other projects or replaying stored history, and
-stored metadata alone cannot establish ownership between two native processes
-that write the same root session. Missing or unavailable evidence does not turn
-into a successful child completion. Child tracking uses Logonomic's existing
-flat lifecycle under the root, and native children retain the root's coordination
-principal. Qwen's native agent configuration determines their tools and permissions.
+discover children by scanning other projects or replaying stored history.
+Within one adapter runtime, only one live Logonomic lifecycle binding can observe
+a native session metadata directory. A conflicting binding fails observation with
+`subagent_session_already_bound`; Logonomic degrades the affected terminal's
+whole lifecycle profile, including root turns, attention and child tracking.
+This refusal does not stop the native CLI or change its task result or transcript.
+Missing or unavailable evidence does not turn into a successful child completion.
+Child tracking uses Logonomic's existing flat lifecycle under the root, and native
+children retain the root's coordination principal. Qwen's native agent
+configuration determines their tools and permissions.
 
 In a live terminal, native root `SessionStart` hooks select the conversation after
 `/clear` or a successful `/resume`. Logonomic retains the departed conversation in

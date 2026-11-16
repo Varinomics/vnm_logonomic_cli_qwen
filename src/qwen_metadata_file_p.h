@@ -6,10 +6,13 @@
 #include <io.h>
 #endif
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <memory>
+#include <optional>
+#include <string>
 
 namespace qwen::detail {
 
@@ -20,12 +23,14 @@ struct Metadata_file_close
 
 using Metadata_file = std::unique_ptr<std::FILE, Metadata_file_close>;
 
-inline Metadata_file open_metadata_file(const std::filesystem::path& io_path)
+inline std::optional<std::string> read_metadata_file(
+    const std::filesystem::path& io_path, std::size_t maximum_bytes)
 {
+    std::string bytes(maximum_bytes + 1, '\0');
     std::FILE* input = nullptr;
 #ifdef _WIN32
-    // Qwen publishes each snapshot by rename-over. The reader must not make
-    // that best-effort write fail while it retains the preceding snapshot.
+    // Permit delete sharing, but Windows rename-over can still fail while
+    // this handle is open. Retain only the bytes after the bounded read.
     const auto handle = CreateFileW(io_path.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -44,7 +49,15 @@ inline Metadata_file open_metadata_file(const std::filesystem::path& io_path)
 #else
     input = std::fopen(io_path.c_str(), "rb");
 #endif
-    return Metadata_file(input);
+    const Metadata_file file(input);
+    if (!file) {
+        return std::nullopt;
+    }
+    bytes.resize(std::fread(bytes.data(), 1, bytes.size(), file.get()));
+    if (std::ferror(file.get()) || bytes.size() > maximum_bytes) {
+        return std::nullopt;
+    }
+    return bytes;
 }
 
 } // namespace qwen::detail

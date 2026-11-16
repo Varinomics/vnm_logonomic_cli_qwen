@@ -17,7 +17,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -99,22 +98,17 @@ Metadata_read read_metadata(
     if (error || size > k_metadata_bound) {
         return {std::nullopt, true};
     }
-    auto input = detail::open_metadata_file(native_io_path(path));
-    if (!input) {
+    const auto bytes = detail::read_metadata_file(native_io_path(path), k_metadata_bound);
+    if (!bytes) {
         // Atomic replacement may remove the path between stat and open.
         if (!fs::exists(native_io_path(path), error) && !error) {
             return {};
         }
         return {std::nullopt, true};
     }
-    std::string bytes(k_metadata_bound + 1, '\0');
-    bytes.resize(std::fread(bytes.data(), 1, bytes.size(), input.get()));
-    if (std::ferror(input.get()) || bytes.size() > k_metadata_bound) {
-        return {std::nullopt, true};
-    }
     addon::Json_parse_limits limits;
     limits.max_string_bytes = k_metadata_bound;
-    const auto value = addon::parse_json(bytes, limits, nullptr);
+    const auto value = addon::parse_json(*bytes, limits, nullptr);
     if (!value || !value->is_object() || json::text(*value, "parentSessionId") != session ||
         json::text(*value, "agentId") != agent)
     {
