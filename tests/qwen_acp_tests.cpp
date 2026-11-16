@@ -89,11 +89,14 @@ void require_close(const addon::Structured_inspect_result& result, std::int64_t 
     require(!result.complete && !result.close_stdin && !result.failure_reason && result.stdin_bytes,
         "quiescence requests conditional close without sending EOF");
     const auto request = parse(*result.stdin_bytes);
+    // Built before the && chain: as its last operand, GCC 13 at -O2/-O3 reports
+    // the initializer list's conditional exception cleanup as maybe-uninitialized.
+    const auto expected_params = json_util::object({
+        {"sessionId", Json("session-alpha")}, {"onlyIfUnheld", Json(true)},
+        {"requireFlush", Json(true)}, {"drainTimeoutMs", Json(8000)}});
     require(json_util::text(request, "method") == "qwen/control/session/close" &&
         json_util::member(request, "id").as_integer() == id &&
-        json_util::member(request, "params") == json_util::object({
-            {"sessionId", Json("session-alpha")}, {"onlyIfUnheld", Json(true)},
-            {"requireFlush", Json(true)}, {"drainTimeoutMs", Json(8000)}}),
+        json_util::member(request, "params") == expected_params,
         "close requires native atomic no-holds validation and a bounded history flush");
 }
 
