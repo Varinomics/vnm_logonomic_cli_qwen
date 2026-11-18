@@ -1,5 +1,6 @@
 #include "qwen_json.h"
 #include "qwen_peer.h"
+#include "qwen_profile.h"
 #include "qwen_session_wake.h"
 
 #include <logonomic_cli_addon/package_source.h>
@@ -257,6 +258,11 @@ bool capability_contract()
         request.target.launch_environment = *launch.launch_environment;
         request.target.correlation.transition_nonce = std::string(32, 'e');
         request.target.binding = preparation.binding;
+        if (std::string_view(status) == "held") {
+            const auto original = fixture.profile() / "";
+            request.target.binding.set("profile_path", qwen::Json(original.string()));
+            request.target.binding.set("account_key", qwen::Json(qwen::historical_posix_account_key(original)));
+        }
         request.target.binding.set("launch_token", qwen::Json(k_binding));
         request.notification_id = "mailbox-notification";
         request.instruction = "/shell @file\nMailbox ready";

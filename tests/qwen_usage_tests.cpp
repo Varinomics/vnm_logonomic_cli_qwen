@@ -677,6 +677,16 @@ void posix_profile_uses_qwen_path_join()
         "the old locator still matches the same native profile after reset");
     request.context.account_context->profile_path = qwen::path_string(peer / "profile");
     require(invoke(request).failure == "account_profile_mismatch", "a different native profile cannot use the retained key");
+    require(qwen::account_key(selected) == qwen::account_key(selected / "") &&
+        qwen::account_key(selected) == qwen::account_key(selected / ".") &&
+        qwen::profile_directory("/") == fs::path("/"), "directory spellings share one account and preserve root");
+    const auto old_key = "profile-" + addon::to_hex(addon::Sha256::digest(qwen::path_string(selected) + "/"));
+    request.context.account_context = addon::Account_context{2, old_key, qwen::path_string(selected / ".")};
+    require(qwen::profile_for_context(request.context).home == selected,
+        "the original trailing-directory grant remains usable");
+    request.context.account_context->profile_path = qwen::path_string(peer / "profile/");
+    require(invoke(request).failure == "account_profile_mismatch",
+        "a historical trailing-directory key cannot select another profile");
 }
 #endif
 

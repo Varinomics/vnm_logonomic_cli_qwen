@@ -1005,11 +1005,11 @@ void regular_or_absent(const fs::path& path)
         throw Usage_error("usage_storage_invalid");
 }
 
-std::string cache_owner(const addon::Usage_scan_request& request, const fs::path& home)
+std::string cache_owner(const addon::Usage_scan_request& request, const std::string& profile)
 {
     return addon::serialize_json_canonical(json_util::object({
         {"account", Json(request.context.account_context ? request.context.account_context->adapter_account_key : std::string{})},
-        {"profile", Json(account_key(home))}}));
+        {"profile", Json(profile)}}));
 }
 
 Json encode_event(std::string_view session, std::string_view uuid, const Event& event)
@@ -1354,7 +1354,8 @@ std::optional<Json> isolated_cache_event(std::string_view line)
     return row;
 }
 
-std::optional<Evidence> read_cache(const fs::path& path, std::string_view owner,
+std::optional<Evidence> read_cache(const fs::path& path, const std::string& owner,
+    const std::optional<std::string>& historical_owner,
     addon::Invocation_context& context)
 {
     regular_or_absent(path);
@@ -1366,8 +1367,10 @@ std::optional<Evidence> read_cache(const fs::path& path, std::string_view owner,
     addon::Sha256 digest;
     if (!read_line(input, &line, budget, context)) throw Usage_error("usage_cache_invalid");
     const auto header = json_util::parse(line);
-    if (!header || !json_util::exact_keys(*header, {"version", "owner"}) || integer(json_util::member(*header, "version")) != 1 || json_util::text(*header, "owner") != owner)
+    if (!header || !json_util::exact_keys(*header, {"version", "owner"}) || integer(json_util::member(*header, "version")) != 1)
         throw Usage_error("usage_cache_owner_mismatch");
+    const auto actual_owner = json_util::text(*header, "owner");
+    if (actual_owner != owner && historical_owner != actual_owner) throw Usage_error("usage_cache_owner_mismatch");
     digest.update(line); digest.update("\n");
     Evidence evidence;
     std::uint64_t count = 0;
@@ -1648,8 +1651,12 @@ void collect_retained(const addon::Usage_scan_request& request, const fs::path& 
         }
         input_file = addon::usage_cache_io_path(addon::path_from_utf8(selection.accepted->root)) / "records";
     }
-    const auto owner = cache_owner(request, home);
-    auto retained = read_cache(input_file, owner, context);
+    const auto owner = cache_owner(request, account_key(home));
+    std::optional<std::string> historical_owner;
+#ifndef _WIN32
+    historical_owner = cache_owner(request, historical_posix_account_key(home / ""));
+#endif
+    auto retained = read_cache(input_file, owner, historical_owner, context);
     Budget budget{Usage_limits{}};
     auto evidence = retained ? std::move(*retained) : Evidence{};
     Source_index source_index;

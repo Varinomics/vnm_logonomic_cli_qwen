@@ -427,7 +427,7 @@ Resume_inspection inspect_resume(const addon::Session_launch_context& context, c
             result.preparation_failure.clear();
         }
         if (provenance && !addon::same_native_account_profile(
-            addon::path_from_utf8(json::text(*provenance, "profile_home")).lexically_normal(), profile.home.lexically_normal()))
+            profile_directory(addon::path_from_utf8(json::text(*provenance, "profile_home"))), profile_directory(profile.home)))
         {
             result.preparation_failure = "qwen_resume_scope_mismatch";
             return result;

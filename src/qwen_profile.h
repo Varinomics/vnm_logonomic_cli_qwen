@@ -19,6 +19,11 @@ struct resolved_profile_t
 };
 
 std::string account_key(const std::filesystem::path& home);
+std::filesystem::path profile_directory(const std::filesystem::path& path);
+bool matches_profile_key(const std::filesystem::path& home, const std::filesystem::path& retained, std::string_view key);
+#ifndef _WIN32
+std::string historical_posix_account_key(const std::filesystem::path& path);
+#endif
 std::filesystem::path native_io_path(const std::filesystem::path& path);
 resolved_profile_t profile_from_environment(const logonomic::cli_addon::Launch_environment& environment);
 resolved_profile_t profile_for_context(const logonomic::cli_addon::Session_launch_context& context);

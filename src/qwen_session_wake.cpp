@@ -28,9 +28,7 @@ std::optional<Peer_target> bound_peer(const addon::Session_wake_target& target)
     }
     const auto profile = profile_from_environment(target.launch_environment);
     const auto retained = addon::path_from_utf8(json_util::text(target.binding, "profile_path"));
-    if (retained.lexically_normal() != profile.home ||
-        account_key(profile.home) != json_util::text(target.binding, "account_key"))
-    {
+    if (!matches_profile_key(profile.home, retained, json_util::text(target.binding, "account_key"))) {
         return std::nullopt;
     }
     return find_peer(profile.home, target.provider_session_id, json_util::text(target.binding, "launch_token"));

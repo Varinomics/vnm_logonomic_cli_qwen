@@ -376,6 +376,14 @@ void settings_contract(const fs::path& root)
     expect(qwen::inspect_resume(context, qwen::make_resume_record(k_session, Json::object())),
         Availability::AVAILABLE, Content::NONEMPTY, true,
         "legacy records in the ordinary profile runtime remain inspectable");
+#ifndef _WIN32
+    const auto trailing = qwen::make_resume_record(k_session, json::object({
+        {"transcript_path", Json(addon::path_to_utf8(default_source))},
+        {"cwd", Json(addon::path_to_utf8(fixture.cwd))},
+        {"profile_home", Json(addon::path_to_utf8(fixture.profile / ""))}}));
+    expect(qwen::inspect_resume(context, trailing), Availability::AVAILABLE, Content::NONEMPTY, true,
+        "native provenance with a trailing separator belongs to the same selected profile");
+#endif
 #ifdef _WIN32
     const auto staging = fixture.profile.parent_path() / "staging";
     fs::create_directory(staging);
