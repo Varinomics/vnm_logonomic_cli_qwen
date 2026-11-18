@@ -4,6 +4,7 @@
 #include "qwen_conversation.h"
 #include "qwen_profile.h"
 
+#include <logonomic_cli_addon/accounts.h>
 #include <logonomic_cli_addon/launcher_utilities.h>
 #include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/package_source.h>
@@ -77,18 +78,11 @@ bool same_path(const fs::path& left, const fs::path& right)
 
 bool project_text_matches(std::string_view left, std::string_view right)
 {
-    return left.size() == right.size() && std::equal(left.begin(), left.end(), right.begin(),
-        [](char a, char b) {
 #ifdef _WIN32
-            if (a >= 'A' && a <= 'Z') {
-                a += 'a' - 'A';
-            }
-            if (b >= 'A' && b <= 'Z') {
-                b += 'a' - 'A';
-            }
+    return addon::same_native_account_profile(addon::path_from_utf8(left), addon::path_from_utf8(right));
+#else
+    return left == right;
 #endif
-            return a == b;
-        });
 }
 
 bool project_matches(std::string_view recorded, std::string_view current)
@@ -432,8 +426,8 @@ Resume_inspection inspect_resume(const addon::Session_launch_context& context, c
         if (result.preparation_allowed) {
             result.preparation_failure.clear();
         }
-        if (provenance && account_key(profile.home) !=
-            account_key(addon::path_from_utf8(json::text(*provenance, "profile_home"))))
+        if (provenance && !addon::same_native_account_profile(
+            addon::path_from_utf8(json::text(*provenance, "profile_home")).lexically_normal(), profile.home.lexically_normal()))
         {
             result.preparation_failure = "qwen_resume_scope_mismatch";
             return result;

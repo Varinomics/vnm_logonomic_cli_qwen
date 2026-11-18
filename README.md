@@ -169,7 +169,10 @@ selecting the profile. Managed hook installation transforms a host-granted
 settings and hook comments survive, and modified same-name managed definitions
 or an explicit `disableAllHooks` are refused rather than overwritten.
 
-Accounts identify the selected profile directory. They do not claim a vendor
+Accounts identify the selected profile directory. Windows account keys follow
+the native case rules of each containing directory. An older key shared by two
+case-distinct profiles can resume access only with its matching saved path.
+Accounts do not claim a vendor
 user identity or enumerate hypothetical alternate profiles. Static credential
 evidence cannot prove an authenticated server session, so no standalone auth
 status capability is advertised. Native ACP reports actual authentication

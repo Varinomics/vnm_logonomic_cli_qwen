@@ -22,7 +22,7 @@ addon::Account_record account(const resolved_profile_t& profile)
     // A profile that cannot be checked, such as one on an unreachable share, is
     // an unavailable account: it must not fail the discovery of every account.
     std::error_code error;
-    result.status = fs::is_directory(profile.home, error)
+    result.status = fs::is_directory(native_io_path(profile.home), error)
         ? addon::Account_status::AVAILABLE
         : addon::Account_status::UNAVAILABLE;
     return result;
