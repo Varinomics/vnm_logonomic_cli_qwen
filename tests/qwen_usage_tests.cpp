@@ -624,6 +624,62 @@ void equivalent_windows_profile_spelling_reuses_cache()
 #endif
 }
 
+#ifndef _WIN32
+void posix_profile_uses_qwen_path_join()
+{
+    Workspace workspace;
+    const auto selected = workspace.path / "profile";
+    const auto peer = workspace.path / "other";
+    fs::create_directories(peer / "child");
+    fs::create_directory_symlink(peer / "child", workspace.path / "link");
+    const auto raw = workspace.path / "link/../profile";
+    write(selected / "usage_record.jsonl", summary("native", 22));
+    write(peer / "profile/usage_record.jsonl", summary("foreign", 199));
+
+    auto request = request_for(selected);
+    request.context.account_context->profile_path = qwen::path_string(raw);
+    request.context.launch_environment->bootstrap->resolved_home = qwen::path_string(raw);
+    request.context.launch_environment->effective_environment.set("QWEN_HOME", addon::Json_value(qwen::path_string(raw)));
+    const auto page = successful_page(request);
+    require(page.records.size() == 1 && page.records.front().record_id == "qwen:native" &&
+        page.records.front().total_tokens == 22, "usage must come from the directory opened by Qwen's path.join");
+
+    // Rebuild the old provider's sealed summary with the ambiguous raw source.
+    // The envelope, footer and account binding are otherwise valid.
+    auto legacy = page.records.front();
+    legacy.source_path = qwen::path_string(raw / "usage_record.jsonl");
+    const auto records = read(addon::path_from_utf8(page.cache_candidate->root) / "records");
+    const auto body = records.substr(0, records.find('\n') + 1) + addon::serialize_json(json_util::object({
+        {"summary", addon::encode_stored_usage_accounting(legacy)}})) + '\n';
+    const auto footer = json_util::object({{"end", addon::Json_value(1)}, {"count", addon::Json_value(1)},
+        {"sha256", addon::Json_value(addon::to_hex(addon::Sha256::digest(body)))}});
+    const auto input = request.cache_selection->candidate_root;
+    write(addon::path_from_utf8(input) / "records", body + addon::serialize_json(footer) + '\n');
+    addon::Contract_failure failure;
+    const auto sealed = addon::seal_usage_cache_candidate(input, request.context.profile_storage->root,
+        request.context.account_context, "legacy", "qwen-evidence-cache@1", [] { return false; }, &failure);
+    require(sealed.has_value(), "old Qwen cache fixture must seal");
+    select_next_cache(request, sealed);
+    for (const auto mode : {"incremental", "repair"}) {
+        request.mode = mode;
+        require(invoke(request).failure == "usage_cache_profile_reset_required",
+            "historical raw paths must not republish another profile's evidence");
+    }
+
+    request.mode = "reset";
+    select_next_cache(request, std::nullopt);
+    const auto reset = successful_page(request);
+    require(reset.records.size() == 1 && reset.records.front().total_tokens == 22,
+        "reset rebuilds selected native history");
+    request.mode = "incremental";
+    request.context.launch_environment->bootstrap->resolved_home = qwen::path_string(selected);
+    require(successful_page(request).records.front().total_tokens == 22,
+        "the old locator still matches the same native profile after reset");
+    request.context.account_context->profile_path = qwen::path_string(peer / "profile");
+    require(invoke(request).failure == "account_profile_mismatch", "a different native profile cannot use the retained key");
+}
+#endif
+
 void request_coverage_counts_errors_and_summary_requests()
 {
     Workspace workspace;
@@ -720,6 +776,9 @@ int main()
         copied_evidence_recovers_ancestry_without_parent_files();
         current_scans_refresh_durable_history();
         equivalent_windows_profile_spelling_reuses_cache();
+#ifndef _WIN32
+        posix_profile_uses_qwen_path_join();
+#endif
         request_coverage_counts_errors_and_summary_requests();
         limits_cancel_before_publication();
         profile_consumes_host_resolution_without_environment_mutation();

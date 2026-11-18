@@ -199,6 +199,11 @@ amounts are corrected together. A bounded atomic cache in host-acknowledged prof
 storage preserves the evidence and identities across restarts and source deletion.
 Native history remains unchanged.
 
+On Linux, Qwen removes `..` from the profile path before opening its files.
+If a previous add-in cached usage from a path containing `..`, the scan returns
+`usage_cache_profile_reset_required`. Reset token usage to rebuild it from the
+selected native profile.
+
 The optional `usage-temporal@1` capability accompanies `usage-scan@3`. It
 preserves admitted native UTC millisecond event timestamps, resolves original
 UUID ownership before assigning portions, and uses the same model-wide total

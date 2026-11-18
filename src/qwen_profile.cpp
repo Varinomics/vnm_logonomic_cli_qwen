@@ -32,7 +32,7 @@ bool matches_account(const fs::path& home, const addon::Account_context& grant)
     }
     return addon::same_native_account_profile(original, selected);
 #else
-    return retained.native() == home.native() && grant.adapter_account_key == account_key(home);
+    return retained.lexically_normal() == home && grant.adapter_account_key == account_key(home);
 #endif
 }
 
@@ -65,6 +65,11 @@ resolved_profile_t profile_from_environment(const addon::Launch_environment& env
     if (!result.home.is_absolute()) {
         throw std::runtime_error("qwen_profile_normalization_unavailable");
     }
+#ifndef _WIN32
+    // Qwen uses Node's path.join to select files inside this directory. Dot
+    // segments are removed before the kernel follows any directory symlinks.
+    result.home = result.home.lexically_normal();
+#endif
     result.environment = environment_pairs(environment.effective_environment);
     return result;
 }

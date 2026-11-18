@@ -27,7 +27,8 @@ std::optional<Peer_target> bound_peer(const addon::Session_wake_target& target)
         return std::nullopt;
     }
     const auto profile = profile_from_environment(target.launch_environment);
-    if (path_string(profile.home) != json_util::text(target.binding, "profile_path") ||
+    const auto retained = addon::path_from_utf8(json_util::text(target.binding, "profile_path"));
+    if (retained.lexically_normal() != profile.home ||
         account_key(profile.home) != json_util::text(target.binding, "account_key"))
     {
         return std::nullopt;

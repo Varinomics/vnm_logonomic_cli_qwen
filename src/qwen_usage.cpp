@@ -1395,6 +1395,16 @@ std::optional<Evidence> read_cache(const fs::path& path, std::string_view owner,
             {
                 throw Usage_error("usage_cache_invalid");
             }
+#ifndef _WIN32
+            if (record->source_path) {
+                // Older scans opened the raw profile path. A symlink before
+                // ".." could have supplied this record from another profile.
+                const auto source = addon::path_from_utf8(*record->source_path);
+                if (std::find(source.begin(), source.end(), fs::path("..")) != source.end()) {
+                    throw Usage_error("usage_cache_profile_reset_required");
+                }
+            }
+#endif
             const auto id = record->record_id;
             if (summary) {
                 if (!json_util::exact_keys(*row, {"summary"}) ||
