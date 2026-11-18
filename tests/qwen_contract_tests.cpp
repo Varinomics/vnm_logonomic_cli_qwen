@@ -2,6 +2,7 @@
 #include "qwen_launcher.h"
 #include "qwen_launcher_approval.h"
 #include "qwen_lifecycle.h"
+#include "qwen_profile.h"
 
 #include <logonomic_cli_addon/capability_ids.h>
 #include <logonomic_cli_addon/context_state.h>
@@ -391,6 +392,16 @@ bool resume_hook_failures(addon::Host_simulator& host, const std::filesystem::pa
     managed.set("disableAllHooks", qwen::Json(true));
     write_settings(addon::serialize_json_canonical(managed));
     ok &= expect(addon::Host_status::FAILED, "hooks_disabled_by_user");
+#ifdef _WIN32
+    const auto dotted = home / "selected.";
+    std::filesystem::create_directory(home / "selected");
+    std::ofstream(home / "selected" / "settings.json") << "{}";
+    std::filesystem::create_directory(qwen::native_io_path(dotted));
+    std::ofstream(qwen::native_io_path(dotted / "settings.json")) << R"({"disableAllHooks":true})";
+    request.context.launch_environment->bootstrap->resolved_home = addon::path_to_utf8(dotted);
+    ok &= expect(addon::Host_status::FAILED, "hooks_disabled_by_user");
+    std::filesystem::remove_all(qwen::native_io_path(dotted));
+#endif
     return ok;
 }
 

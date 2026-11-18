@@ -431,7 +431,7 @@ void prepare_resume(addon::Invocation_context& invocation)
         invocation.fail(addon::Result_status::UNAVAILABLE, "resume_selector_unavailable");
         return;
     }
-    const auto config = profile.home / "settings.json";
+    const auto config = native_io_path(profile.home / "settings.json");
     std::error_code error;
     if (fs::file_size(config, error) > 768 * 1024 || error) {
         invocation.fail(addon::Result_status::UNAVAILABLE, "managed_hooks_unavailable");
