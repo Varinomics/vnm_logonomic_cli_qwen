@@ -675,8 +675,16 @@ void posix_profile_uses_qwen_path_join()
     request.context.launch_environment->bootstrap->resolved_home = qwen::path_string(selected);
     require(successful_page(request).records.front().total_tokens == 22,
         "the old locator still matches the same native profile after reset");
+    const auto rejects_foreign = [&] {
+        try { (void)qwen::profile_for_context(request.context); }
+        catch (const std::runtime_error& error) {
+            return std::string_view(error.what()) == "account_profile_mismatch" &&
+                invoke(request).failure == "usage_source_unavailable";
+        }
+        return false;
+    };
     request.context.account_context->profile_path = qwen::path_string(peer / "profile");
-    require(invoke(request).failure == "account_profile_mismatch", "a different native profile cannot use the retained key");
+    require(rejects_foreign(), "a different native profile cannot use the retained key");
     require(qwen::account_key(selected) == qwen::account_key(selected / "") &&
         qwen::account_key(selected) == qwen::account_key(selected / ".") &&
         qwen::profile_directory("/") == fs::path("/"), "directory spellings share one account and preserve root");
@@ -685,7 +693,7 @@ void posix_profile_uses_qwen_path_join()
     require(qwen::profile_for_context(request.context).home == selected,
         "the original trailing-directory grant remains usable");
     request.context.account_context->profile_path = qwen::path_string(peer / "profile/");
-    require(invoke(request).failure == "account_profile_mismatch",
+    require(rejects_foreign(),
         "a historical trailing-directory key cannot select another profile");
 }
 #endif
