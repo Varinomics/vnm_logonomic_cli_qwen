@@ -112,7 +112,7 @@ bool powershell_initial_argument(std::string_view argument)
 std::optional<std::vector<std::string>> initial_prompt_command(
     const addon::Prepare_request& request,
     const Environment& environment,
-    addon::Invocation_context& invocation)
+    const Launcher_probes& probes)
 {
     const auto& prompt = *request.initial_prompt;
     const auto brief = addon::path_from_utf8(prompt.referenced_file);
@@ -132,7 +132,7 @@ std::optional<std::vector<std::string>> initial_prompt_command(
 #ifdef _WIN32
     if (request.launcher.runner_key == addon::k_runner_powershell) {
         const auto selected = inspect_powershell_launcher(request.launcher, request.launcher_argv,
-            environment, request.working_directory, invocation);
+            environment, request.working_directory, probes);
         if (!selected || !initial_prompt_options(selected->option_values) ||
             !powershell_initial_argument(prompt.text) || !powershell_initial_argument(additions[1]))
         {
@@ -142,7 +142,7 @@ std::optional<std::vector<std::string>> initial_prompt_command(
         checked.insert(checked.end(), additions.begin(), additions.end());
         if (!platform_command(checked, environment, request.working_directory) ||
             !selected_program_supports(selected->program, environment, request.working_directory,
-                required_options, invocation))
+                required_options, probes))
         {
             return std::nullopt;
         }
@@ -163,7 +163,7 @@ std::optional<std::vector<std::string>> initial_prompt_command(
     }
 #endif
     if (!selected_program_supports(command->front(), environment, request.working_directory,
-            required_options, invocation))
+            required_options, probes))
     {
         return std::nullopt;
     }
@@ -173,6 +173,7 @@ std::optional<std::vector<std::string>> initial_prompt_command(
 
 void prepare_launch(addon::Invocation_context& invocation)
 {
+    const Launcher_probes probes(invocation);
     addon::Contract_failure failure;
     const auto request = addon::decode_prepare_request(invocation.request().payload, &failure, 3);
     if (!request) {
@@ -187,7 +188,7 @@ void prepare_launch(addon::Invocation_context& invocation)
     patch.account_context = request->account_context;
     const auto environment = environment_pairs(request->launch_environment->effective_environment);
     if (request->initial_prompt) {
-        patch.argv = initial_prompt_command(*request, environment, invocation);
+        patch.argv = initial_prompt_command(*request, environment, probes);
         if (!patch.argv) {
             invocation.fail(invocation.cancel_requested()
                     ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,
@@ -219,7 +220,7 @@ void prepare_launch(addon::Invocation_context& invocation)
     else
     if (request->launcher.runner_key == addon::k_runner_powershell) {
         const auto selected = inspect_powershell_launcher(request->launcher, request->launcher_argv,
-            environment, request->working_directory, invocation);
+            environment, request->working_directory, probes);
         admitted = selected.has_value();
     }
 #endif
@@ -259,7 +260,7 @@ void prepare_launch(addon::Invocation_context& invocation)
 template<class Request>
 std::optional<addon::Process_proposal> acp_process(
     const Request& request,
-    addon::Invocation_context& invocation,
+    const Launcher_probes& probes,
     const addon::Delegated_model_selection* selection = nullptr)
 {
     if (request.purpose != addon::Structured_purpose::IMPLEMENTATION || request.prompt.empty() ||
@@ -268,8 +269,10 @@ std::optional<addon::Process_proposal> acp_process(
         return std::nullopt;
     }
     const auto profile = profile_for_context(request.context);
+    const std::initializer_list<std::string_view> acp_options{"--acp"};
+    const std::initializer_list<std::string_view> model_options{"--acp", "--model", "--fallback-model"};
     auto command = verified_command(request.context.launcher, request.context.launcher_argv,
-        profile.environment, request.context.working_directory, "--acp", invocation);
+        profile.environment, request.context.working_directory, selection && selection->model ? model_options : acp_options, probes);
     if (!command) {
         return std::nullopt;
     }
@@ -278,9 +281,7 @@ std::optional<addon::Process_proposal> acp_process(
         // Qwen splits fallback values at commas and trims them. A sole fallback
         // equal to the selected model is skipped by its native retry loop.
         if (model.starts_with('-') || model.find(',') != std::string::npos || addon::trim(model) != model ||
-            model.starts_with("\xEF\xBB\xBF") || model.ends_with("\xEF\xBB\xBF") ||
-            !selected_program_supports(command->front(), profile.environment, request.context.working_directory,
-                {"--model", "--fallback-model"}, invocation))
+            model.starts_with("\xEF\xBB\xBF") || model.ends_with("\xEF\xBB\xBF"))
         {
             return std::nullopt;
         }
@@ -310,6 +311,7 @@ std::optional<addon::Process_proposal> acp_process(
 
 void prepare_structured(addon::Invocation_context& invocation)
 {
+    const Launcher_probes probes(invocation);
     addon::Contract_failure failure;
     const auto request = addon::decode_structured_prepare_request(invocation.request().payload, &failure);
     if (!request) {
@@ -319,7 +321,7 @@ void prepare_structured(addon::Invocation_context& invocation)
     if (!bootstrap_available(request->context.launch_environment, invocation)) {
         return;
     }
-    const auto process = acp_process(*request, invocation);
+    const auto process = acp_process(*request, probes);
     if (!process) {
         invocation.fail(invocation.cancel_requested() ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,
             invocation.cancel_requested() ? "cancelled" : "structured_launcher_unavailable");
@@ -336,6 +338,7 @@ void prepare_structured(addon::Invocation_context& invocation)
 
 void prepare_delegated(addon::Invocation_context& invocation)
 {
+    const Launcher_probes probes(invocation);
     addon::Contract_failure failure;
     const auto request = addon::decode_delegated_prepare_request(invocation.request().payload, &failure);
     if (!request) {
@@ -356,7 +359,7 @@ void prepare_delegated(addon::Invocation_context& invocation)
     if (!bootstrap_available(request->context.launch_environment, invocation)) {
         return;
     }
-    const auto process = acp_process(*request, invocation,
+    const auto process = acp_process(*request, probes,
         request->model_selection ? &*request->model_selection : nullptr);
     if (!process) {
         invocation.fail(invocation.cancel_requested() ? addon::Result_status::CANCELLED : addon::Result_status::UNAVAILABLE,
@@ -387,6 +390,7 @@ void prepare_delegated(addon::Invocation_context& invocation)
 
 void prepare_resume(addon::Invocation_context& invocation)
 {
+    const Launcher_probes probes(invocation);
     addon::Contract_failure failure;
     const auto request = addon::decode_resume_prepare_request(invocation.request().payload, &failure, 2);
     if (!request) {
@@ -413,7 +417,7 @@ void prepare_resume(addon::Invocation_context& invocation)
     std::optional<Powershell_selection> powershell;
     if (launch_context.launcher.runner_key == addon::k_runner_powershell) {
         powershell = inspect_powershell_launcher(launch_context.launcher, launch_context.launcher_argv,
-            profile.environment, launch_context.working_directory, invocation);
+            profile.environment, launch_context.working_directory, probes);
         if (!powershell) {
             invocation.fail(addon::Result_status::UNAVAILABLE, "resume_selector_unavailable");
             return;
@@ -461,7 +465,7 @@ void prepare_resume(addon::Invocation_context& invocation)
 #ifdef _WIN32
     if (powershell) {
         if (selected_program_supports(powershell->program, profile.environment,
-            launch_context.working_directory, {"--resume"}, invocation))
+            launch_context.working_directory, {"--resume"}, probes))
         {
             command = powershell_session_command(*powershell, {"--resume", session});
         }
@@ -470,7 +474,7 @@ void prepare_resume(addon::Invocation_context& invocation)
 #endif
     {
         command = verified_command(launch_context.launcher, launch_context.launcher_argv,
-            profile.environment, launch_context.working_directory, "--resume", invocation);
+            profile.environment, launch_context.working_directory, {"--resume"}, probes);
         if (command) {
             command->insert(command->end(), {"--resume", session});
             command = platform_command(*command, profile.environment, launch_context.working_directory);

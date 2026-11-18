@@ -1,5 +1,6 @@
 #include "qwen_launcher.h"
 #include "qwen_json.h"
+#include <logonomic_cli_addon/limits.h>
 #include <logonomic_cli_addon/package_source.h>
 #include <logonomic_cli_addon/session_contracts.h>
 #include <algorithm>
@@ -12,6 +13,26 @@ namespace json_util = logonomic::cli_addon::json;
 namespace qwen {
 namespace addon = logonomic::cli_addon;
 namespace fs = std::filesystem;
+
+Launcher_probes::Launcher_probes(addon::Invocation_context& invocation)
+:
+    m_invocation(invocation)
+{
+    const auto budget = std::chrono::milliseconds(std::min<std::int64_t>(
+        invocation.request().deadline_ms, addon::limits::k_launch_prepare_deadline_ms));
+    // Leave time to stop the child, encode the result and return it to the host.
+    const auto reserve = std::min(budget / 10, std::chrono::milliseconds(1000));
+    m_deadline = std::chrono::steady_clock::now() + budget - reserve;
+}
+
+std::optional<Probe_output> Launcher_probes::run(const std::vector<std::string>& argv,
+    const Environment& environment, std::string_view working_directory) const
+{
+    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(m_deadline - std::chrono::steady_clock::now());
+    if (left.count() <= 0 || m_invocation.cancel_requested()) return std::nullopt;
+    return probe(argv, environment, working_directory, static_cast<int>(left.count()), m_invocation);
+}
+
 std::string path_string(const fs::path& path)
 {
     const auto text = path.u8string();
@@ -245,7 +266,7 @@ catch { exit 3 }
 std::optional<Powershell_selection> inspect_powershell_launcher(
     const addon::Launcher_request& launcher, const std::vector<std::string>& argv,
     const Environment& environment, std::string_view working_directory,
-    addon::Invocation_context& context)
+    const Launcher_probes& probes)
 {
     if (launcher.runner_key != addon::k_runner_powershell) {
         return std::nullopt;
@@ -258,7 +279,7 @@ std::optional<Powershell_selection> inspect_powershell_launcher(
     if (argv != expected) {
         return std::nullopt;
     }
-    auto selection = inspect_powershell_launcher(launcher, environment, working_directory, context);
+    auto selection = inspect_powershell_launcher(launcher, environment, working_directory, probes);
     if (selection) {
         selection->no_exit = argv.size() == 5;
     }
@@ -267,7 +288,7 @@ std::optional<Powershell_selection> inspect_powershell_launcher(
 
 std::optional<Powershell_selection> inspect_powershell_launcher(
     const addon::Launcher_request& launcher, const Environment& environment,
-    std::string_view working_directory, addon::Invocation_context& context)
+    std::string_view working_directory, const Launcher_probes& probes)
 {
     if (launcher.runner_key != addon::k_runner_powershell) {
         return std::nullopt;
@@ -278,8 +299,8 @@ std::optional<Powershell_selection> inspect_powershell_launcher(
     }
     const std::string analysis = "$SourceBase64='" + addon::encode_base64(launcher.script_body) + "'\n" +
         std::string(k_powershell_analysis);
-    const auto output = probe({path_string(*shell), "-NoLogo", "-NonInteractive", "-Command", analysis},
-        environment, working_directory, 10000, context);
+    const auto output = probes.run({path_string(*shell), "-NoLogo", "-NonInteractive", "-Command", analysis},
+        environment, working_directory);
     if (!output) {
         return std::nullopt;
     }
@@ -394,7 +415,7 @@ bool help_declares_option(std::string_view help, std::string_view required_optio
 bool selected_program_supports(
     std::string_view program, const Environment& environment,
     std::string_view working_directory, std::initializer_list<std::string_view> required_options,
-    addon::Invocation_context& context)
+    const Launcher_probes& probes)
 {
     const auto selected = addon::path_from_utf8(program);
     const auto probe_command = platform_command({std::string(program), "--help"}, environment, working_directory);
@@ -410,7 +431,7 @@ bool selected_program_supports(
     if (error) {
         return false;
     }
-    const auto output = probe(*probe_command, environment, working_directory, 10000, context);
+    const auto output = probes.run(*probe_command, environment, working_directory);
     if (!output || fs::file_size(selected, error) != size || error ||
         fs::last_write_time(selected, error) != modified || error)
     {
@@ -426,11 +447,11 @@ bool selected_program_supports(
 std::optional<std::vector<std::string>> verified_command(
     const addon::Launcher_request& launcher, const std::vector<std::string>& argv,
     const Environment& environment, std::string_view working_directory,
-    std::string_view required_option, addon::Invocation_context& context)
+    std::initializer_list<std::string_view> required_options, const Launcher_probes& probes)
 {
     auto command = selected_command(launcher, argv, environment, working_directory);
     if (!command || !selected_program_supports(command->front(), environment,
-        working_directory, {required_option}, context))
+        working_directory, required_options, probes))
     {
         return std::nullopt;
     }

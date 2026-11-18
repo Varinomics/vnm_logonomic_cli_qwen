@@ -37,6 +37,12 @@ namespace addon = logonomic::cli_addon;
 
 using Context = addon::test::Throwing_invocation_context;
 
+void prepare(Context& context)
+{
+    context.m_request.deadline_ms = addon::limits::k_launch_prepare_deadline_ms;
+    qwen::handle_preparation(context);
+}
+
 void require(bool condition, const char* description)
 {
     if (!condition) throw std::runtime_error(description);
@@ -108,7 +114,8 @@ addon::Json_value run_resume_process(const addon::Resume_prepare_result& result,
     auto command = std::vector<std::string>{addon::path_to_utf8(executable.parent_path() / "qwen_launch_bridge.exe")};
     command.insert(command.end(), result.process.argv.begin(), result.process.argv.end());
     Context context;
-    const auto output = qwen::probe(command, result.patch.set, request.context.working_directory, 10000, context);
+    const auto output = qwen::probe(command, result.patch.set, request.context.working_directory,
+        addon::limits::k_resume_prepare_deadline_ms, context);
     require(output.has_value(), "the proposed bridge and PowerShell command must complete");
     std::ifstream input(addon::path_from_utf8(request.context.account_context->profile_path.value()) / "capture.json",
         std::ios::binary);
@@ -169,7 +176,7 @@ void required_control_reaches_native_admission(const char* executable)
     request.control.servers.push_back({"delegation", server_program, {"targets", "submit"}, {}});
     Context context;
     context.m_request = {"delegated", {"delegated-session", 3}, "prepare", addon::encode_delegated_prepare_request(request)};
-    qwen::handle_preparation(context);
+    prepare(context);
     addon::Contract_failure failure;
     const auto result = context.m_result ? addon::decode_delegated_prepare_result(*context.m_result, &failure) : std::nullopt;
     require(result && result->acknowledgment.connection_version == addon::k_delegated_connection_version &&
@@ -187,7 +194,7 @@ void required_control_reaches_native_admission(const char* executable)
         Context configured;
         configured.m_request = {"delegated", {"delegated-session", 3}, "prepare",
             addon::encode_delegated_prepare_request(selected)};
-        qwen::handle_preparation(configured);
+        prepare(configured);
         const auto proposal = configured.m_result
             ? addon::decode_delegated_prepare_result(*configured.m_result, &failure) : std::nullopt;
         auto expected = selected.context.launcher_argv;
@@ -204,7 +211,7 @@ void required_control_reaches_native_admission(const char* executable)
         Context configured;
         configured.m_request = {"delegated", {"delegated-session", 3}, "prepare",
             addon::encode_delegated_prepare_request(selected)};
-        qwen::handle_preparation(configured);
+        prepare(configured);
         const auto proposal = configured.m_result
             ? addon::decode_delegated_prepare_result(*configured.m_result, &failure) : std::nullopt;
         auto expected = override_model
@@ -227,7 +234,7 @@ void required_control_reaches_native_admission(const char* executable)
         refused.m_request = {"delegated", {"delegated-session", 3}, "prepare",
             addon::encode_delegated_prepare_request(selected)};
         bool scoped_refusal = false;
-        try { qwen::handle_preparation(refused); }
+        try { prepare(refused); }
         catch (const std::runtime_error& error) { scoped_refusal = std::string(error.what()) == "model_selection_unavailable"; }
         require(scoped_refusal && !refused.m_result,
             "model syntax that cannot preserve sole-model fallback is refused before launch");
@@ -238,7 +245,7 @@ void required_control_reaches_native_admission(const char* executable)
         Context configured;
         configured.m_request = {"delegated", {"delegated-session", 3}, "prepare",
             addon::encode_delegated_prepare_request(selected)};
-        qwen::handle_preparation(configured);
+        prepare(configured);
         const auto proposal = configured.m_result
             ? addon::decode_delegated_prepare_result(*configured.m_result, &failure) : std::nullopt;
         require(proposal && proposal->process.argv == result->process.argv && proposal->process.environment == result->process.environment,
@@ -249,7 +256,7 @@ void required_control_reaches_native_admission(const char* executable)
         unavailable.m_request = {"delegated", {"delegated-session", 3}, "prepare",
             addon::encode_delegated_prepare_request(selected)};
         bool scoped_refusal = false;
-        try { qwen::handle_preparation(unavailable); }
+        try { prepare(unavailable); }
         catch (const std::runtime_error& error) { scoped_refusal = std::string(error.what()) == "model_selection_unavailable"; }
         require(scoped_refusal && !unavailable.m_result,
             "an installed CLI without sole-model fallback support cannot advertise an applied model");
@@ -283,7 +290,7 @@ void required_control_reaches_native_admission(const char* executable)
     Context unconnected;
     unconnected.m_request = {"delegated", {"delegated-session", 3}, "prepare", addon::encode_delegated_prepare_request(request)};
     bool refused = false;
-    try { qwen::handle_preparation(unconnected); }
+    try { prepare(unconnected); }
     catch (const std::runtime_error& error) { refused = std::string(error.what()) == "task_server_connection_unavailable"; }
     require(refused && unconnected.m_failure_status == addon::Result_status::UNAVAILABLE && !unconnected.m_result,
         "Task servers are never launched without the host relay");
@@ -345,7 +352,7 @@ void launch_disposition(const char* executable)
         context.m_request.capability = {"launch-preparation", 3};
         context.m_request.operation = "prepare";
         context.m_request.payload = addon::encode_prepare_request(request, 3);
-        qwen::handle_preparation(context);
+        prepare(context);
         require(context.m_result.has_value(), "provider must return a terminal preparation");
         addon::Contract_failure failure;
         const auto patch = addon::decode_launch_patch(*context.m_result, &failure, 3);
@@ -373,7 +380,7 @@ void launch_disposition(const char* executable)
         context.m_request.capability = {"launch-preparation", 3};
         context.m_request.operation = "prepare";
         context.m_request.payload = addon::encode_prepare_request(request, 3);
-        qwen::handle_preparation(context);
+        prepare(context);
         addon::Contract_failure failure;
         const auto patch = context.m_result ? addon::decode_launch_patch(*context.m_result, &failure, 3) : std::nullopt;
         require(patch && patch->disposition && !patch->disposition->prepared,
@@ -425,7 +432,7 @@ void direct_launch_starts_selected_program(const char* executable)
         request.launch_environment = environment;
         Context context;
         context.m_request = {"direct", {"launch-preparation", 3}, "prepare", addon::encode_prepare_request(request, 3)};
-        qwen::handle_preparation(context);
+        prepare(context);
         addon::Contract_failure failure;
         const auto patch = context.m_result ? addon::decode_launch_patch(*context.m_result, &failure, 3) : std::nullopt;
         require(patch && patch->argv && patch->disposition && patch->disposition->prepared,
@@ -437,7 +444,7 @@ void direct_launch_starts_selected_program(const char* executable)
         std::error_code ignored;
         fs::remove(root / "selected" / "capture.json", ignored);
         const auto output = qwen::probe(*patch->argv, qwen::environment_pairs(environment.effective_environment),
-            request.working_directory, 10000, context);
+            request.working_directory, addon::limits::k_launch_prepare_deadline_ms, context);
         require(output.has_value(), "the actual fresh-launch invocation completes through CreateProcessW");
         std::ifstream input(root / "selected" / "capture.json", std::ios::binary);
         const std::string content{std::istreambuf_iterator<char>(input), {}};
@@ -500,7 +507,7 @@ void resume_policy(const char* executable)
         "legacy resume fixture has no native transcript evidence");
     Context context;
     context.m_request = {"resume", {"interactive-resume", 2}, "prepare_resume", addon::encode_resume_prepare_request(request, 2)};
-    qwen::handle_preparation(context);
+    prepare(context);
     addon::Contract_failure failure;
     const auto result = context.m_result ? addon::decode_resume_prepare_result(*context.m_result, &failure, 2) : std::nullopt;
     require(result && addon::validate_resume_process_proposal(result->process, &failure) &&
@@ -516,7 +523,7 @@ void resume_policy(const char* executable)
     Context wake_context;
     wake_context.m_request = {"resume-wake", {"interactive-resume", 2}, "prepare_resume",
         addon::encode_resume_prepare_request(request, 2)};
-    qwen::handle_preparation(wake_context);
+    prepare(wake_context);
     const auto wake_result = wake_context.m_result
         ? addon::decode_resume_prepare_result(*wake_context.m_result, &failure, 2) : std::nullopt;
     require(wake_result.has_value(), "resume preserves its independently negotiated wake result");
@@ -571,7 +578,7 @@ void resume_policy(const char* executable)
         Context retained_context;
         retained_context.m_request = {"resume-retained", {"interactive-resume", 2}, "prepare_resume",
             addon::encode_resume_prepare_request(retained, 2)};
-        qwen::handle_preparation(retained_context);
+        prepare(retained_context);
         const auto proposal = retained_context.m_result
             ? addon::decode_resume_prepare_result(*retained_context.m_result, &failure, 2) : std::nullopt;
         require(proposal && proposal->process.argv.back() == "019933a1-6e43-7102-a520-b3c8294cc763" &&
@@ -593,7 +600,7 @@ void resume_policy(const char* executable)
             addon::encode_resume_prepare_request(mismatched, 2)};
         bool rejected = false;
         try {
-            qwen::handle_preparation(mismatched_context);
+            prepare(mismatched_context);
         }
         catch (const std::exception& error) {
             rejected = std::string_view(error.what()) == "qwen_resume_scope_mismatch";
@@ -638,7 +645,7 @@ void resume_policy(const char* executable)
         Context persistent_context;
         persistent_context.m_request = {"persistent-resume", {"interactive-resume", 2}, "prepare_resume",
             addon::encode_resume_prepare_request(persistent, 2)};
-        qwen::handle_preparation(persistent_context);
+        prepare(persistent_context);
         const auto proposal = persistent_context.m_result
             ? addon::decode_resume_prepare_result(*persistent_context.m_result, &failure, 2) : std::nullopt;
         require(proposal &&
@@ -762,7 +769,7 @@ void resume_policy(const char* executable)
             Context shell_context;
             shell_context.m_request = {"resume", {"interactive-resume", 2}, "prepare_resume",
                 addon::encode_resume_prepare_request(request, 2)};
-            qwen::handle_preparation(shell_context);
+            prepare(shell_context);
             const auto prepared = addon::decode_resume_prepare_result(*shell_context.m_result, &failure, 2);
             require(prepared && addon::validate_resume_process_proposal(prepared->process, &failure) &&
                 addon::validate_resume_acknowledgment(request.resume_record, prepared->acknowledgment, &failure),
@@ -802,7 +809,7 @@ void resume_policy(const char* executable)
         shell_context.m_request = {"resume", {"interactive-resume", 2}, "prepare_resume",
             addon::encode_resume_prepare_request(request, 2)};
         try {
-            qwen::handle_preparation(shell_context);
+            prepare(shell_context);
             std::cerr << name << ": invalid or dynamic PowerShell script was accepted\n";
             ++failures;
         }

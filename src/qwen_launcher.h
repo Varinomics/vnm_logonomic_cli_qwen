@@ -4,6 +4,7 @@
 #include <logonomic_cli_addon/launcher_discovery.h>
 #include <logonomic_cli_addon/launcher_utilities.h>
 
+#include <chrono>
 #include <filesystem>
 #include <initializer_list>
 #include <optional>
@@ -28,6 +29,18 @@ using logonomic::cli_addon::resolve_program;
 using logonomic::cli_addon::native_image;
 using logonomic::cli_addon::probe;
 
+class Launcher_probes
+{
+public:
+    Launcher_probes(logonomic::cli_addon::Invocation_context& invocation);
+    std::optional<Probe_output> run(const std::vector<std::string>& argv,
+        const Environment& environment, std::string_view working_directory) const;
+
+private:
+    logonomic::cli_addon::Invocation_context& m_invocation;
+    std::chrono::steady_clock::time_point m_deadline;
+};
+
 std::string path_string(const std::filesystem::path& path);
 #ifdef _WIN32
 struct Powershell_selection
@@ -42,10 +55,10 @@ struct Powershell_selection
 std::optional<Powershell_selection> inspect_powershell_launcher(
     const logonomic::cli_addon::Launcher_request& launcher,
     const std::vector<std::string>& argv, const Environment& environment,
-    std::string_view working_directory, logonomic::cli_addon::Invocation_context& context);
+    std::string_view working_directory, const Launcher_probes& probes);
 std::optional<Powershell_selection> inspect_powershell_launcher(
     const logonomic::cli_addon::Launcher_request& launcher, const Environment& environment,
-    std::string_view working_directory, logonomic::cli_addon::Invocation_context& context);
+    std::string_view working_directory, const Launcher_probes& probes);
 std::optional<std::vector<std::string>> powershell_session_command(
     const Powershell_selection& selection, const std::vector<std::string>& arguments);
 #endif
@@ -67,12 +80,12 @@ std::optional<std::vector<std::string>> selected_command(
 std::optional<std::vector<std::string>> verified_command(
     const logonomic::cli_addon::Launcher_request& launcher,
     const std::vector<std::string>& argv, const Environment& environment,
-    std::string_view working_directory, std::string_view required_option,
-    logonomic::cli_addon::Invocation_context& context);
+    std::string_view working_directory, std::initializer_list<std::string_view> required_options,
+    const Launcher_probes& probes);
 bool selected_program_supports(
     std::string_view program, const Environment& environment,
     std::string_view working_directory, std::initializer_list<std::string_view> required_options,
-    logonomic::cli_addon::Invocation_context& context);
+    const Launcher_probes& probes);
 std::optional<std::vector<std::string>> platform_command(
     const std::vector<std::string>& argv, const Environment& environment,
     std::string_view working_directory);

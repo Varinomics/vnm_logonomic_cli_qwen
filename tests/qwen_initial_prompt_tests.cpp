@@ -96,9 +96,10 @@ std::string quote(std::string_view value)
 }
 #endif
 
-std::optional<addon::Launch_patch> prepare(const addon::Prepare_request& request, Context& context)
+std::optional<addon::Launch_patch> prepare(const addon::Prepare_request& request, Context& context,
+    int deadline_ms = addon::limits::k_launch_prepare_deadline_ms)
 {
-    context.m_request = {"initial", {"launch-preparation", 3}, "prepare", addon::encode_prepare_request(request)};
+    context.m_request = {"initial", {"launch-preparation", 3}, "prepare", addon::encode_prepare_request(request), deadline_ms};
     qwen::handle_preparation(context);
     addon::Contract_failure failure;
     return context.m_result ? addon::decode_launch_patch(*context.m_result, &failure) : std::nullopt;
@@ -137,6 +138,25 @@ void delayed_preparation(addon::Prepare_request request, const fs::path& root)
         single_probe = single_probe && starts == 1;
     }
     require(single_probe, "each complete preparation must acquire help once for both required options");
+    request.launch_environment->effective_environment.set("QWEN_INITIAL_TEST_HELP_DELAY", addon::Json_value("10500"));
+    Context cold;
+    const auto patch = prepare(request, cold);
+    require(patch && patch->initial_prompt, "cold native help can use the host's launch preparation time");
+    Context short_request;
+    try { (void)prepare(request, short_request, 700); }
+    catch (const std::runtime_error&) {}
+    require(short_request.m_failure_status == addon::Result_status::UNAVAILABLE && !short_request.m_result,
+        "a shorter host deadline limits the same slow native help operation");
+
+    short_request.m_request.deadline_ms = 50;
+    const qwen::Launcher_probes shared(short_request);
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    request.launch_environment->effective_environment.set("QWEN_INITIAL_TEST_HELP_DELAY", addon::Json_value("0"));
+    fs::remove(root / "help-starts");
+    require(!qwen::selected_program_supports(request.launcher_argv.front(),
+        qwen::environment_pairs(request.launch_environment->effective_environment), request.working_directory,
+        {"--prompt-interactive"}, shared) && !fs::exists(root / "help-starts"),
+        "a later probe cannot start a new child after the operation's shared deadline");
 }
 
 void initial_prompt_delivery(const fs::path& executable)
@@ -246,7 +266,7 @@ void initial_prompt_delivery(const fs::path& executable)
             patch->apply_managed_configuration,
             "initial-prompt preparation retains the selected account and managed hooks");
         const auto output = qwen::probe(*patch->argv, qwen::environment_pairs(environment.effective_environment),
-            request.working_directory, 10000, context);
+            request.working_directory, addon::limits::k_launch_prepare_deadline_ms, context);
         const auto capture = output ? addon::parse_json(output->output, {}, nullptr) : std::nullopt;
         require(capture && capture->is_object() && capture->find("home")->as_string() == home,
             "the proposed command reaches its native child with the selected profile");
