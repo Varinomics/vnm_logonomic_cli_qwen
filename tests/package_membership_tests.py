@@ -39,7 +39,7 @@ def main() -> int:
         parser.add_argument('--' + name, required=True)
     for name in ('config', 'build-type', 'generator-platform', 'toolset', 'toolchain', 'compiler', 'make-program', 'prefix-path'):
         parser.add_argument('--' + name, default='')
-    for name in ('framework-source', 'dispatch-source', 'vnm-cmake-source',
+    for name in ('observation-source', 'dispatch-source', 'vnm-cmake-source',
                  'observation-prefix', 'dispatch-prefix', 'qtbase-source', 'runtime-notices',
                  'linux-runtime-material', 'patchelf'):
         parser.add_argument('--' + name, default='')
@@ -53,7 +53,7 @@ def main() -> int:
         # TMPDIR may itself point inside an input checkout. Refuse before
         # copying so the temporary source cannot recursively include itself.
         protected_inputs = [source, sdk]
-        for value in (args.framework_source, args.dispatch_source, args.vnm_cmake_source,
+        for value in (args.observation_source, args.dispatch_source, args.vnm_cmake_source,
                       args.qtbase_source, args.runtime_notices, args.linux_runtime_material):
             if value:
                 protected_inputs.append(Path(value).resolve(strict=True))
@@ -101,7 +101,7 @@ def main() -> int:
             value = getattr(args, field)
             if value:
                 definitions.append((key, value))
-        for field, key in (('framework_source', 'QWEN_FRAMEWORK_SOURCE'),
+        for field, key in (('observation_source', 'QWEN_OBSERVATION_SOURCE'),
                            ('dispatch_source', 'FETCHCONTENT_SOURCE_DIR_VNM_QT_DISPATCH'),
                            ('vnm_cmake_source', 'FETCHCONTENT_SOURCE_DIR_VNM_CMAKE'),
                            ('observation_prefix', 'vnm_filesystem_observation_DIR'),

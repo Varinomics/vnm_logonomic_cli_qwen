@@ -3,7 +3,7 @@
 [![CI](https://github.com/Varinomics/vnm_logonomic_cli_qwen/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/Varinomics/vnm_logonomic_cli_qwen/actions/workflows/ci.yml)
 
 Standalone C++20 add-on for Qwen Code on Windows/Linux x86-64 and macOS ARM64. It uses
-the public Logonomic CLI add-on SDK and the owned filesystem observation service,
+the Logonomic CLI add-on SDK and the owned filesystem observation service,
 with QtCore for native child observation. Qwen Code is installed separately;
 this package does not install a CLI, log in, copy credentials, or call a paid API.
 
@@ -249,10 +249,13 @@ PowerShell; arguments that cannot safely survive a `.cmd` expansion are refused.
 
 ## Building and qualification
 
+The [contributor guide](https://github.com/Varinomics/vnm_logonomic_cli_addon/blob/master/CONTRIBUTING.md) covers local package checks.
+Send provider pull requests to [the qwen repository](https://github.com/Varinomics/vnm_logonomic_cli_qwen/pulls).
+
 The owned SDK and filesystem observation source dependencies track `master`.
 A local SDK override is available as `LOGONOMIC_CLI_ADDON_SDK_SOURCE`, pointing
-at `sdk/logonomic_cli_addon_sdk`. `QWEN_FRAMEWORK_SOURCE` selects a local
-`vnm_framework` checkout; the observer reuses an embedding build's existing
+at `sdk/logonomic_cli_addon_sdk`. `QWEN_OBSERVATION_SOURCE` selects a local
+`vnm_filesystem_observation` checkout; the observer reuses an embedding build's existing
 `vnm_framework::vnm_filesystem_observation` target when available. The leaf
 requires Qt 6.12 or later, Core only, and the owned `vnm_qt_dispatch` dependency.
 Build `qwen_package` in a separate build tree;

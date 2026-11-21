@@ -32,7 +32,7 @@ else()
     else()
         include(FetchContent)
         FetchContent_Declare(logonomic_sdk_source
-            GIT_REPOSITORY https://github.com/Varinomics/logonomic.git
+            GIT_REPOSITORY https://github.com/Varinomics/vnm_logonomic_cli_addon.git
             GIT_TAG master
             GIT_SHALLOW TRUE
             SOURCE_SUBDIR sdk/logonomic_cli_addon_sdk)
@@ -218,7 +218,7 @@ if(LOGONOMIC_CLI_ADDON_RECIPE_TESTS)
     add_test(NAME qwen_package_membership
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/package_membership_tests.py"
             "--source=${CMAKE_CURRENT_SOURCE_DIR}" "--sdk=${_membership_sdk_source}"
-            "--framework-source=${qwen_framework_source}"
+            "--observation-source=${qwen_observation_source}"
             "--dispatch-source=${qwen_dispatch_source}"
             "--vnm-cmake-source=${qwen_vnm_cmake_source}"
             "--observation-prefix=${vnm_filesystem_observation_DIR}"
