@@ -256,13 +256,11 @@ The owned SDK and filesystem observation source dependencies track `master`.
 A local SDK override is available as `LOGONOMIC_CLI_ADDON_SDK_SOURCE`, pointing
 at `sdk/logonomic_cli_addon_sdk`. `QWEN_OBSERVATION_SOURCE` selects a local
 `vnm_filesystem_observation` checkout; the observer reuses an embedding build's existing
-`vnm_framework::vnm_filesystem_observation` target when available. The leaf
-requires Qt 6.12 or later, Core only, and the owned `vnm_qt_dispatch` dependency.
+`vnm_framework::vnm_filesystem_observation` target when available. The observer uses Qt Core and `vnm_qt_dispatch`.
 Build `qwen_package` in a separate build tree;
 its indexed output is `package/logonomic.cli.qwen` below a single-configuration
 build tree, or `package/<config>/logonomic.cli.qwen` with a multi-configuration
-generator. Compiler-invoking commands must use the applicable queued-build
-policy. The provider CI's preparation callback acquires the selected platform's
+generator. The provider CI's preparation callback acquires the selected platform's
 Qt kit, matching notices, and current owned sources before configuration.
 
 The SDK's shared Qt recipe places `qwen_adapter`, `qwen_helper` and `qwen_launch_bridge` in
@@ -280,15 +278,7 @@ prebuilt input record for Qt, ICU, or other acquired runtimes. Missing provenanc
 fails package assembly. These inputs do not relax integrity or loader-closure
 checks.
 
-The package recipe proves the Windows/Linux x86-64 or macOS ARM64 compiler target
-during configuration. `cmake --install` exports a fresh artifact beneath its install-time
-prefix and preserves executable permissions. An existing per-package destination,
-including a dangling symlink, is refused. POSIX `DESTDIR` staging is supported;
-nonempty `DESTDIR` with a drive-letter prefix is refused. Export is not atomic:
-a failure may leave a partial artifact directory. Choose a fresh destination or
-manually remove only that identified disposable export before retrying; never
-remove an installed generation this way. The application's package ingestion
-owns atomic installation and updates.
+Use `cmake --install` to export the indexed package to a fresh directory. See [SDK package export](https://github.com/Varinomics/vnm_logonomic_cli_addon/blob/master/sdk/logonomic_cli_addon_sdk/docs/package_contract.md#exporting-a-package).
 
 The package includes focused contract, lifecycle observer, usage, ACP and native peer fixtures,
 SDK package validation and package conformance registrations. The native peer

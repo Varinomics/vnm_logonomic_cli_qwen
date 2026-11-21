@@ -70,6 +70,7 @@ target_link_libraries(qwen_provider PUBLIC logonomic_cli_addon_sdk::sdk
     logonomic_cli_addon_sdk::filesystem_observer)
 
 add_executable(qwen_adapter src/adapter.cpp)
+target_compile_definitions(qwen_adapter PRIVATE LOGONOMIC_CLI_ADDON_ADAPTER_VERSION="${PROJECT_VERSION}")
 target_link_libraries(qwen_adapter PRIVATE qwen_provider)
 qwen_target(qwen_adapter)
 add_executable(qwen_helper src/qwen_helper.cpp)

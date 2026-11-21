@@ -11,6 +11,5 @@ jobs:
     uses: Varinomics/logonomic/.github/workflows/cli-addon-provider.yml@master
     with:
       provider: qwen
-      prepare-script: .github/scripts/prepare_ci.py
     secrets:
       VARINOMICS_REPO_READ_TOKEN: ${{ secrets.VARINOMICS_REPO_READ_TOKEN }}
