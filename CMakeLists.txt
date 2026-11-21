@@ -96,6 +96,7 @@ logonomic_cli_addon_add_qt_package(qwen_package logonomic.cli.qwen QWEN_PACKAGE_
     RUNTIME_NOTICES "${QWEN_RUNTIME_NOTICES_DIRECTORY}"
     LINUX_RUNTIME_MATERIAL "${QWEN_LINUX_RUNTIME_MATERIAL}"
     PATCHELF "${QWEN_PATCHELF_EXECUTABLE}"
+    EXTRA_FILES LICENSE notices/LICENSE
     OUT_RUNTIME_CHECK QWEN_RUNTIME_CHECK
     OUT_QTBASE_SOURCE QWEN_QTBASE_SOURCE
     INDEX_ARGUMENTS
@@ -253,6 +254,7 @@ get_directory_property(_provider_tests TESTS)
 set_property(TEST ${_provider_tests} APPEND PROPERTY LABELS "cli-addon;provider-contract")
 
 add_executable(qwen_error_boundary_tests tests/qwen_error_boundary_tests.cpp)
+target_compile_definitions(qwen_error_boundary_tests PRIVATE LOGONOMIC_CLI_ADDON_ADAPTER_VERSION="${PROJECT_VERSION}")
 target_link_libraries(qwen_error_boundary_tests PRIVATE qwen_provider logonomic_cli_addon_sdk::test_support)
 qwen_target(qwen_error_boundary_tests)
 add_test(NAME qwen_error_boundary_tests COMMAND qwen_error_boundary_tests)
