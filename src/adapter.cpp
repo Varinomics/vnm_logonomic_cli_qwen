@@ -148,6 +148,10 @@ void invoke(addon::Invocation_context& context, qwen::Lifecycle_observer& observ
             observer.handle(context);
         }
         else
+        if (capability == addon::k_authoring_session_capability_id) {
+            qwen::handle_authoring(context);
+        }
+        else
         if (capability == "structured-session" && request.operation == "inspect") {
             addon::Contract_failure failure;
             const auto decoded = addon::decode_structured_inspect_request(request.payload, &failure);
@@ -200,6 +204,7 @@ int main()
         {addon::k_attention_kind_capability_id, addon::k_attention_kind_version},
         {"environment-bootstrap", 1},
         {"structured-session", 3}, {"delegated-session", 3},
+        {addon::k_authoring_session_capability_id, addon::k_authoring_session_version},
         {addon::k_delegated_model_selection_capability_id, addon::k_delegated_model_selection_version},
         {"interactive-resume", 2}, {"interactive-resume", 3}, {"interactive-resume", 4},
     };

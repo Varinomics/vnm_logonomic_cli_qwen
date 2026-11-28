@@ -61,7 +61,7 @@ endfunction()
 add_library(qwen_provider STATIC
     src/qwen_conversation.cpp src/qwen_resume.cpp
     src/qwen_accounts.cpp src/qwen_usage.cpp src/qwen_profile.cpp
-    src/qwen_acp.cpp src/qwen_config.cpp src/qwen_launcher.cpp src/qwen_launcher_approval.cpp
+    src/qwen_acp.cpp src/qwen_authoring.cpp src/qwen_config.cpp src/qwen_launcher.cpp src/qwen_launcher_approval.cpp
     src/qwen_lifecycle.cpp src/qwen_observer.cpp src/qwen_preparation.cpp
     src/qwen_peer.cpp src/qwen_session_wake.cpp)
 qwen_target(qwen_provider)
